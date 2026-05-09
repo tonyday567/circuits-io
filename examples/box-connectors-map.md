@@ -1,0 +1,145 @@
+-- | Box.Connectors — old vs new API.
+--
+-- Codensity disappears. <$|> / <*|> / close / process are replaced by
+-- direct circuit composition and runB/glue.
+--
+-- Queue-based connectors (qList, source, sink, etc.) need the STM queue
+-- layer which we haven't ported yet. For now: note the mapping.
+
+-- ============================================================
+-- qList / qListWith  — queue a list as an emitter
+-- ============================================================
+--
+-- Old:
+--   qList :: [a] -> CoEmitter IO a
+--   qList = qListWith Unbounded
+--   pushList <$|> qList [1,2,3]
+--
+-- New (without queue — just emit in sequence):
+--   emitList :: [a] -> Emitter IO a
+--   glue accept (emitList [1,2,3])
+--
+-- With queue (needs STM layer):
+--   qList :: [a] -> Emitter IO a   -- backed by STM queue
+--   queueEmitter :: Queue a -> [a] -> Emitter IO a
+
+-- ============================================================
+-- popList  — feed a list through a committer
+-- ============================================================
+--
+-- Old:
+--   popList :: Monad m => [a] -> Committer m a -> m ()
+--   popList [1..3] showStdout
+--
+-- New:
+--   popList :: Monad m => [a] -> Committer m a -> m ()
+--   popList xs c = mapM_ (runC c) xs
+
+-- ============================================================
+-- pushList / pushListN  — push emitter to list
+-- ============================================================
+--
+-- Old:
+--   pushList :: Monad m => Emitter m a -> m [a]
+--   pushList e = toList <$> flip execStateT Seq.empty (glue push (foist lift e))
+--
+-- New: single-step Emitter always produces one value.
+--   For sequential emits: runE e gives the single value.
+--   For multi-step (Loop): collect via fold.
+--   pushList e = runE e  -- if single step
+--
+-- Old pushListN:
+--   pushListN :: Monad m => Int -> Emitter m a -> m [a]
+--
+--   New: compose emitter with take combinator.
+--   pushListN n e = runB (takeE n e) ()
+
+-- ============================================================
+-- sink / sinkWith  — finite committer queue
+-- ============================================================
+--
+-- Old:
+--   sink :: Int -> (a -> IO ()) -> CoCommitter IO a
+--   sink n f = sinkWith Unbounded n f
+--   glue <$> sink 2 print <*|> qList [1..3]
+--
+-- New (no queue):
+--   replicateM_ n (emit >>= lift . f) as single thread
+--   Or: compose takeE n emitter with consume f committer.
+
+-- ============================================================
+-- source / sourceWith  — finite emitter
+-- ============================================================
+--
+-- Old:
+--   source :: Int -> IO a -> CoEmitter IO a
+--   glue toStdout <$|> source 2 (pure "hi")
+--
+-- New:
+--   source :: Int -> IO a -> Emitter IO a
+--   source n action = ...  -- Loop that calls action n times
+--   glue toStdout (source 2 (pure "hi"))
+
+-- ============================================================
+-- forkEmit  — tee an emitter to a committer
+-- ============================================================
+--
+-- Old:
+--   forkEmit :: Monad m => Emitter m a -> Committer m a -> Emitter m a
+--
+-- New:
+--   forkEmit :: Monad m => Emitter m a -> Committer m a -> Emitter m a
+--   forkEmit e c = dimap id id $ Compose (fork c) e
+--     where fork c = Lift (Kleisli $ \a -> runC c a >> pure a)
+
+-- ============================================================
+-- bufferCommitter / bufferEmitter  — STM queues
+-- ============================================================
+-- Old:
+--   bufferCommitter :: Committer IO a -> CoCommitter IO a
+--   bufferCommitter c = Codensity $ \caction -> queueL Unbounded caction (glue c)
+--
+-- New: Queue circuits are the buffer. bufferCommitter becomes:
+--   spawn a reader thread that pushes to a queue circuit.
+--   (Needs STM queue layer)
+
+-- ============================================================
+-- concurrentE / concurrentC  — concurrent emitters/committers
+-- ============================================================
+-- Old:
+--   concurrentE :: Queue a -> Emitter IO a -> Emitter IO a -> CoEmitter IO a
+--   -- runs both on threads, merges via queue
+--
+-- New: Merge via Loop with a queue tensor.
+--   concurrentE :: Emitter IO a -> Emitter IO a -> Emitter IO a
+--   (queue is internal to the Loop state)
+
+-- ============================================================
+-- takeQ  — take n from queued emitter
+-- ============================================================
+-- Old:
+--   takeQ :: Queue a -> Int -> Emitter IO a -> CoEmitter IO a
+--
+-- New:
+--   takeE :: Int -> Emitter m a -> Emitter m a
+--   (Loop with counter in feedback channel)
+
+-- ============================================================
+-- evalEmitter / evalEmitterWith  — stateful emitter
+-- ============================================================
+-- Old:
+--   evalEmitter :: s -> Emitter (StateT s IO) a -> CoEmitter IO a
+--   evalEmitter s e = emitQ q $ \c -> glueES s c e
+--
+-- New:
+--   evalEmitter :: s -> Emitter (StateT s m) a -> Emitter m a
+--   -- Loop that carries s in feedback channel, steps StateT into m
+
+-- ============================================================
+-- Summary of Codensity removals
+-- ============================================================
+--
+--   <$|>   →   glue c emitter   or   runB composed ()
+--   <*|>   →   same, just apply args differently
+--   close  →   runB ... ()   or   glue ...
+--   process →   runB
