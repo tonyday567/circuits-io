@@ -1,18 +1,17 @@
 -- | File I/O via Producer and Consumer from Circuit.Channel.
 --
--- Read lines from a file, write lines to a file.  Producers and Consumers
--- are built from lists; the IO happens in 'readLines' and 'writeLines'.
+-- Read lines from a file, write lines to a file.  The 'Consumer'
+-- for writing uses @IO@ as its monad; the 'Producer' for reading
+-- is pure (@Identity@).
 module Circuit.IO.File
   ( -- * Reading
     readLines,
     linesProducer,
+    collectAll,
 
     -- * Writing
     writeLines,
     linesConsumer,
-
-    -- * Helpers
-    collectAll,
   )
 where
 
@@ -21,25 +20,28 @@ import Circuit.Channel
     Producer,
     accept,
     cons,
+    glue,
     prod,
     yield,
   )
+import Data.Functor.Identity (Identity (..), runIdentity)
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
 import Prelude hiding (id, (.))
 import System.IO (Handle, IOMode (ReadMode, WriteMode), hIsEOF, withFile)
 
 -- $setup
--- >>> :set -XOverloadedStrings -XBlockArguments -XNondecreasingIndentation
+-- >>> :set -XOverloadedStrings -XBlockArguments
 -- >>> import Circuit.Channel
 -- >>> import Circuit.IO.File
+-- >>> import Data.Functor.Identity (Identity(..), runIdentity)
 -- >>> import Data.Text (Text)
 -- >>> import Data.Text.IO qualified as TIO
 -- >>> import System.IO (hClose)
 -- >>> import System.IO.Temp (withSystemTempFile)
 
 -- ---------------------------------------------------------------------------
--- Reading
+-- Reading (pure)
 -- ---------------------------------------------------------------------------
 
 -- | Read all lines from a file, returning them in order.
@@ -58,27 +60,27 @@ readLines fp = withFile fp ReadMode $ \h ->
    in go []
 
 -- | Build a 'Producer' from a list of lines.
--- Each @Just line@ is one message, @Nothing@ signals end.
+-- Pure (@Identity@ monad) — the list is already in memory.
 --
--- >>> glue collectAll (linesProducer ["a", "b", "c"])
+-- >>> runIdentity $ glue collectAll (linesProducer ["a", "b", "c"])
 -- ["a","b","c"]
-linesProducer :: [Text] -> Producer (Maybe Text) [Text]
+linesProducer :: [Text] -> Producer Identity [Text] (Maybe Text)
 linesProducer = foldr (\line p -> prod (Just line) p) (prod Nothing (yield []))
 
--- | Collect all 'Just' values from a producer, stop on 'Nothing'.
+-- | Collect all 'Just' values, stop on 'Nothing'.
 --
--- >>> glue collectAll (linesProducer [])
+-- >>> runIdentity $ glue collectAll (linesProducer [])
 -- []
-collectAll :: Consumer (Maybe a) [a]
+collectAll :: Consumer Identity [Text] (Maybe Text)
 collectAll = go
   where
     go = cons step go
     step mx acc = case mx of
-      Just x  -> x : acc
+      Just x  -> fmap (x :) acc
       Nothing -> acc
 
 -- ---------------------------------------------------------------------------
--- Writing
+-- Writing (IO)
 -- ---------------------------------------------------------------------------
 
 -- | Write lines to a file, one per line.
@@ -89,9 +91,11 @@ writeLines :: FilePath -> [Text] -> IO ()
 writeLines fp lines' = withFile fp WriteMode $ \h ->
   mapM_ (TIO.hPutStrLn h) lines'
 
--- | Build a 'Consumer' that writes each 'Text' as a line to a 'Handle'.
--- Use with 'glue' to feed a 'Producer' into it.
-linesConsumer :: Handle -> Consumer Text ()
+-- | Build a 'Consumer' that writes each 'Text' as a line.
+-- Uses @IO@ monad — each write is an effect.
+--
+-- Use 'glue' to feed a 'Producer' into it. The result is @IO ()@.
+linesConsumer :: Handle -> Consumer IO () Text
 linesConsumer h = cons step (accept ())
   where
-    step line () = TIO.hPutStrLn h line `seq` ()
+    step line acc = acc >> TIO.hPutStrLn h line
