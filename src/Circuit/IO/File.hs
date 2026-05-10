@@ -69,7 +69,7 @@ linesProducer = foldr (\line p -> prod (Just line) p) (prod Nothing (yield []))
 --
 -- >>> glue collectAll (linesProducer [])
 -- []
-collectAll :: Consumer (Maybe Text) [Text]
+collectAll :: Consumer (Maybe a) [a]
 collectAll = go
   where
     go = cons step go

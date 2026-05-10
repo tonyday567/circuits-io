@@ -17,7 +17,7 @@ module Circuit.IO.Time
 where
 
 import Control.Concurrent (threadDelay)
-import Data.Time (UTCTime, diffUTCTime, getCurrentTime, nominalDiffTimeToSeconds)
+import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 
 -- $setup
 -- >>> import Circuit.IO.Time

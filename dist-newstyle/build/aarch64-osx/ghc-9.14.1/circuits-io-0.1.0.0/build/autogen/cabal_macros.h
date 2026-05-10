@@ -60,6 +60,36 @@
   (major1) == 2 && (major2) <  5 || \
   (major1) == 2 && (major2) == 5 && (minor) <= 3)
 #endif /* MIN_VERSION_stm */
+/* package temporary-1.3 */
+#ifndef VERSION_temporary
+#define VERSION_temporary "1.3"
+#endif /* VERSION_temporary */
+#ifndef MIN_VERSION_temporary
+#define MIN_VERSION_temporary(major1,major2,minor) (\
+  (major1) <  1 || \
+  (major1) == 1 && (major2) <  3 || \
+  (major1) == 1 && (major2) == 3 && (minor) <= 0)
+#endif /* MIN_VERSION_temporary */
+/* package text-2.1.3 */
+#ifndef VERSION_text
+#define VERSION_text "2.1.3"
+#endif /* VERSION_text */
+#ifndef MIN_VERSION_text
+#define MIN_VERSION_text(major1,major2,minor) (\
+  (major1) <  2 || \
+  (major1) == 2 && (major2) <  1 || \
+  (major1) == 2 && (major2) == 1 && (minor) <= 3)
+#endif /* MIN_VERSION_text */
+/* package time-1.15 */
+#ifndef VERSION_time
+#define VERSION_time "1.15"
+#endif /* VERSION_time */
+#ifndef MIN_VERSION_time
+#define MIN_VERSION_time(major1,major2,minor) (\
+  (major1) <  1 || \
+  (major1) == 1 && (major2) <  15 || \
+  (major1) == 1 && (major2) == 15 && (minor) <= 0)
+#endif /* MIN_VERSION_time */
 
 /* tool cpphs-1.20.9 */
 #ifndef TOOL_VERSION_cpphs
@@ -71,15 +101,15 @@
   (major1) == 1 && (major2) <  20 || \
   (major1) == 1 && (major2) == 20 && (minor) <= 9)
 #endif /* MIN_TOOL_VERSION_cpphs */
-/* tool doctest-0.24.2 */
+/* tool doctest-0.24.3 */
 #ifndef TOOL_VERSION_doctest
-#define TOOL_VERSION_doctest "0.24.2"
+#define TOOL_VERSION_doctest "0.24.3"
 #endif /* TOOL_VERSION_doctest */
 #ifndef MIN_TOOL_VERSION_doctest
 #define MIN_TOOL_VERSION_doctest(major1,major2,minor) (\
   (major1) <  0 || \
   (major1) == 0 && (major2) <  24 || \
-  (major1) == 0 && (major2) == 24 && (minor) <= 2)
+  (major1) == 0 && (major2) == 24 && (minor) <= 3)
 #endif /* MIN_TOOL_VERSION_doctest */
 /* tool gcc-15.0.0 */
 #ifndef TOOL_VERSION_gcc
