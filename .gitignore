@@ -1,2 +1,4 @@
 dist-newstyle/
 .git/
+dist-newstyle/
+.ghc.environment.*
