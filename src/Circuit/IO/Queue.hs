@@ -16,8 +16,8 @@ module Circuit.IO.Queue
   )
 where
 
-import Control.Concurrent.Async (concurrently)
-import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
+import Control.Concurrent.Async (Concurrently, concurrently)
+import Control.Concurrent.STM
 
 -- $setup
 -- >>> import Circuit.IO.Queue

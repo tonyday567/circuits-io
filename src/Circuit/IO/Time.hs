@@ -16,8 +16,8 @@ module Circuit.IO.Time
   )
 where
 
-import Control.Concurrent (threadDelay)
-import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
+import Control.Concurrent
+import Data.Time
 
 -- $setup
 -- >>> import Circuit.IO.Time

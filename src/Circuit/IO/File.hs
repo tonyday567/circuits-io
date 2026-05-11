@@ -16,19 +16,11 @@ module Circuit.IO.File
 where
 
 import Circuit.Channel
-  ( Consumer,
-    Producer,
-    accept,
-    cons,
-    glue,
-    prod,
-    yield,
-  )
-import Data.Functor.Identity (Identity (..), runIdentity)
-import Data.Text (Text)
+import Data.Functor.Identity
+import Data.Text hiding (cons, foldr, reverse)
 import Data.Text.IO qualified as TIO
 import Prelude hiding (id, (.))
-import System.IO (Handle, IOMode (ReadMode, WriteMode), hIsEOF, withFile)
+import System.IO
 
 -- $setup
 -- >>> :set -XOverloadedStrings -XBlockArguments
