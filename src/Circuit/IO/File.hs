@@ -1,8 +1,8 @@
 -- | File I/O via Producer and Consumer from Circuit.Channel.
 --
 -- Read lines from a file, write lines to a file.  The 'Consumer'
--- for writing uses @IO@ as its monad; the 'Producer' for reading
--- is pure (@Identity@).
+-- for writing threads @IO@ through the accumulator; the 'Producer'
+-- for reading is pure.
 module Circuit.IO.File
   ( -- * Reading
     readLines,
@@ -16,7 +16,7 @@ module Circuit.IO.File
 where
 
 import Circuit.Channel
-import Data.Functor.Identity
+import Circuit.Hyper
 import Data.Text hiding (cons, foldr, reverse)
 import Data.Text.IO qualified as TIO
 import Prelude hiding (id, (.))
@@ -52,23 +52,23 @@ readLines fp = withFile fp ReadMode $ \h ->
    in go []
 
 -- | Build a 'Producer' from a list of lines.
--- Pure (@Identity@ monad) — the list is already in memory.
+-- Pure — the list is already in memory.
 --
 -- >>> runIdentity $ glue collectAll (linesProducer ["a", "b", "c"])
 -- ["a","b","c"]
-linesProducer :: [Text] -> Producer Identity [Text] (Maybe Text)
-linesProducer = foldr (\line p -> prod (Just line) p) (prod Nothing (yield []))
+linesProducer :: [Text] -> Producer (Maybe Text) [Text]
+linesProducer [] = Hyper $ \_ -> []
+linesProducer (x : xs) = prod (Just x) (linesProducer xs)
 
 -- | Collect all 'Just' values, stop on 'Nothing'.
 --
 -- >>> runIdentity $ glue collectAll (linesProducer [])
 -- []
-collectAll :: Consumer Identity [Text] (Maybe Text)
-collectAll = go
+collectAll :: Consumer (Maybe Text) [Text]
+collectAll = cons step (Hyper $ \_ -> \_ -> [])
   where
-    go = cons step go
-    step mx acc = case mx of
-      Just x  -> fmap (x :) acc
+    step acc mx = case mx of
+      Just x -> x : acc
       Nothing -> acc
 
 -- ---------------------------------------------------------------------------
@@ -84,10 +84,10 @@ writeLines fp lines' = withFile fp WriteMode $ \h ->
   mapM_ (TIO.hPutStrLn h) lines'
 
 -- | Build a 'Consumer' that writes each 'Text' as a line.
--- Uses @IO@ monad — each write is an effect.
+-- Uses @IO@ as the accumulator type — each write is an effect.
 --
--- Use 'glue' to feed a 'Producer' into it. The result is @IO ()@.
-linesConsumer :: Handle -> Consumer IO () Text
-linesConsumer h = cons step (accept ())
+-- Use 'glue' to feed a 'Producer' into it.  The result is @IO ()@.
+linesConsumer :: Handle -> Consumer Text (IO ())
+linesConsumer h = cons step (Hyper $ \_ -> \_ -> pure ())
   where
-    step line acc = acc >> TIO.hPutStrLn h line
+    step acc line = acc >> TIO.hPutStrLn h line
