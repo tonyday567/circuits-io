@@ -28,7 +28,7 @@ import Prelude
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.IO.Queue
--- >>> import Control.Concurrent.STM (atomically, newTQueueIO)
+-- >>> import Control.Concurrent.STM (STM, atomically, newTQueueIO, readTQueue, writeTQueue, TQueue)
 
 -- ---------------------------------------------------------------------------
 -- Queue strategies
@@ -53,6 +53,48 @@ data Queue a
 -- | Create a queue, returning @(write, read)@ ends in STM.
 --
 -- The read end blocks until a value is available.
+--
+-- Unbounded FIFO:
+--
+-- >>> (write, read) <- atomically (queueEnds Unbounded :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 1 >> write 2
+-- >>> atomically read
+-- 1
+--
+-- Bounded with backpressure:
+--
+-- >>> (write, read) <- atomically (queueEnds (Bounded 2) :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 1 >> write 2
+-- >>> atomically read
+-- 1
+--
+-- Single-slot overwrite:
+--
+-- >>> (write, read) <- atomically (queueEnds Single :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 42
+-- >>> atomically read
+-- 42
+--
+-- Latest value (always overwrites):
+--
+-- >>> (write, read) <- atomically (queueEnds (Latest 0) :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 1 >> write 2
+-- >>> atomically read
+-- 2
+--
+-- New-only (drops pending, delivers latest):
+--
+-- >>> (write, read) <- atomically (queueEnds New :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 1 >> write 2
+-- >>> atomically read
+-- 2
+--
+-- Newest N (drops oldest when full):
+--
+-- >>> (write, read) <- atomically (queueEnds (Newest 2) :: STM (Int -> STM (), STM Int))
+-- >>> atomically $ write 1 >> write 2 >> write 3
+-- >>> atomically read
+-- 2
 queueEnds :: Queue a -> STM (a -> STM (), STM a)
 queueEnds qu =
   case qu of
@@ -81,10 +123,20 @@ queueEnds qu =
 -- ---------------------------------------------------------------------------
 
 -- | Write a list of values into a 'TQueue'.
+--
+-- >>> q <- newTQueueIO :: IO (TQueue Int)
+-- >>> feedQueue q [1, 2, 3]
+-- >>> atomically (readTQueue q)
+-- 1
 feedQueue :: TQueue a -> [a] -> IO ()
 feedQueue q = mapM_ (atomically . writeTQueue q)
 
 -- | Read up to @n@ values from a 'TQueue'.  Blocks on each read.
+--
+-- >>> q <- newTQueueIO :: IO (TQueue Int)
+-- >>> feedQueue q [1, 2, 3]
+-- >>> drainQueue q 2
+-- [1,2]
 drainQueue :: TQueue a -> Int -> IO [a]
 drainQueue q n = go n []
   where
@@ -98,5 +150,8 @@ drainQueue q n = go n []
 -- ---------------------------------------------------------------------------
 
 -- | Run two IO actions concurrently, returning both results.
+--
+-- >>> runConcurrently (pure 1) (pure 2)
+-- (1,2)
 runConcurrently :: IO a -> IO b -> IO (a, b)
 runConcurrently = concurrently
