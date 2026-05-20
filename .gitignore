@@ -2,3 +2,5 @@ dist-newstyle/
 .git/
 dist-newstyle/
 .ghc.environment.*
+*.hie
+dist-newstyle/

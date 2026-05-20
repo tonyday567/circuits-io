@@ -37,7 +37,7 @@ version = Version [0,1,0,0] []
 
 -- |The content of the @synopsis@ field of the package's Cabal file.
 synopsis :: String
-synopsis = "Free traced monoidal category over any base category"
+synopsis = "traced categories and circuits"
 -- |The content of the @copyright@ field of the package's Cabal file.
 copyright :: String
 copyright = "Tony Day (c) 2025"

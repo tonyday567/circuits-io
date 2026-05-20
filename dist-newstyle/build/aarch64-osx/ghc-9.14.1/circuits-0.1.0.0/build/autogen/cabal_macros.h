@@ -30,16 +30,6 @@
   (major1) == 5 && (major2) <  6 || \
   (major1) == 5 && (major2) == 6 && (minor) <= 3)
 #endif /* MIN_VERSION_profunctors */
-/* package these-1.2.1 */
-#ifndef VERSION_these
-#define VERSION_these "1.2.1"
-#endif /* VERSION_these */
-#ifndef MIN_VERSION_these
-#define MIN_VERSION_these(major1,major2,minor) (\
-  (major1) <  1 || \
-  (major1) == 1 && (major2) <  2 || \
-  (major1) == 1 && (major2) == 2 && (minor) <= 1)
-#endif /* MIN_VERSION_these */
 
 /* tool cpphs-1.20.9 */
 #ifndef TOOL_VERSION_cpphs

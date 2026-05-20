@@ -30,6 +30,26 @@
   (major1) == 4 && (major2) <  22 || \
   (major1) == 4 && (major2) == 22 && (minor) <= 0)
 #endif /* MIN_VERSION_base */
+/* package box-0.9.4.0 */
+#ifndef VERSION_box
+#define VERSION_box "0.9.4.0"
+#endif /* VERSION_box */
+#ifndef MIN_VERSION_box
+#define MIN_VERSION_box(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  9 || \
+  (major1) == 0 && (major2) == 9 && (minor) <= 4)
+#endif /* MIN_VERSION_box */
+/* package bytestring-0.12.2.0 */
+#ifndef VERSION_bytestring
+#define VERSION_bytestring "0.12.2.0"
+#endif /* VERSION_bytestring */
+#ifndef MIN_VERSION_bytestring
+#define MIN_VERSION_bytestring(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  12 || \
+  (major1) == 0 && (major2) == 12 && (minor) <= 2)
+#endif /* MIN_VERSION_bytestring */
 /* package circuits-0.1.0.0 */
 #ifndef VERSION_circuits
 #define VERSION_circuits "0.1.0.0"
@@ -50,6 +70,46 @@
   (major1) == 0 && (major2) <  8 || \
   (major1) == 0 && (major2) == 8 && (minor) <= 0)
 #endif /* MIN_VERSION_containers */
+/* package directory-1.3.10.1 */
+#ifndef VERSION_directory
+#define VERSION_directory "1.3.10.1"
+#endif /* VERSION_directory */
+#ifndef MIN_VERSION_directory
+#define MIN_VERSION_directory(major1,major2,minor) (\
+  (major1) <  1 || \
+  (major1) == 1 && (major2) <  3 || \
+  (major1) == 1 && (major2) == 3 && (minor) <= 10)
+#endif /* MIN_VERSION_directory */
+/* package network-simple-0.4.5 */
+#ifndef VERSION_network_simple
+#define VERSION_network_simple "0.4.5"
+#endif /* VERSION_network_simple */
+#ifndef MIN_VERSION_network_simple
+#define MIN_VERSION_network_simple(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  4 || \
+  (major1) == 0 && (major2) == 4 && (minor) <= 5)
+#endif /* MIN_VERSION_network_simple */
+/* package process-1.6.28.0 */
+#ifndef VERSION_process
+#define VERSION_process "1.6.28.0"
+#endif /* VERSION_process */
+#ifndef MIN_VERSION_process
+#define MIN_VERSION_process(major1,major2,minor) (\
+  (major1) <  1 || \
+  (major1) == 1 && (major2) <  6 || \
+  (major1) == 1 && (major2) == 6 && (minor) <= 28)
+#endif /* MIN_VERSION_process */
+/* package profunctors-5.6.3 */
+#ifndef VERSION_profunctors
+#define VERSION_profunctors "5.6.3"
+#endif /* VERSION_profunctors */
+#ifndef MIN_VERSION_profunctors
+#define MIN_VERSION_profunctors(major1,major2,minor) (\
+  (major1) <  5 || \
+  (major1) == 5 && (major2) <  6 || \
+  (major1) == 5 && (major2) == 6 && (minor) <= 3)
+#endif /* MIN_VERSION_profunctors */
 /* package stm-2.5.3.1 */
 #ifndef VERSION_stm
 #define VERSION_stm "2.5.3.1"
@@ -80,16 +140,26 @@
   (major1) == 2 && (major2) <  1 || \
   (major1) == 2 && (major2) == 1 && (minor) <= 3)
 #endif /* MIN_VERSION_text */
-/* package time-1.15 */
+/* package time-1.14 */
 #ifndef VERSION_time
-#define VERSION_time "1.15"
+#define VERSION_time "1.14"
 #endif /* VERSION_time */
 #ifndef MIN_VERSION_time
 #define MIN_VERSION_time(major1,major2,minor) (\
   (major1) <  1 || \
-  (major1) == 1 && (major2) <  15 || \
-  (major1) == 1 && (major2) == 15 && (minor) <= 0)
+  (major1) == 1 && (major2) <  14 || \
+  (major1) == 1 && (major2) == 14 && (minor) <= 0)
 #endif /* MIN_VERSION_time */
+/* package websockets-0.13.0.0 */
+#ifndef VERSION_websockets
+#define VERSION_websockets "0.13.0.0"
+#endif /* VERSION_websockets */
+#ifndef MIN_VERSION_websockets
+#define MIN_VERSION_websockets(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  13 || \
+  (major1) == 0 && (major2) == 13 && (minor) <= 0)
+#endif /* MIN_VERSION_websockets */
 
 /* tool cpphs-1.20.9 */
 #ifndef TOOL_VERSION_cpphs
