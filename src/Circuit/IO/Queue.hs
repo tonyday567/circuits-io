@@ -1,4 +1,4 @@
--- | STM-backed queue strategies.
+-- | STM-backed queue strategies with cap/cup (compact closed) interface.
 --
 -- Ported from box/Box.Queue, recast for circuits-io.  Provides
 -- buffered communication primitives with selectable backpressure
@@ -11,6 +11,10 @@ module Circuit.IO.Queue
     Queue (..),
     queueEnds,
 
+    -- * Cap & cup (compact closed)
+    makeQueue,
+    glueC,
+
     -- * Feed / drain
     feedQueue,
     drainQueue,
@@ -20,6 +24,8 @@ module Circuit.IO.Queue
   )
 where
 
+import Circuit (Circuit (..))
+import Control.Arrow (Kleisli (..))
 import Control.Applicative
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.STM
@@ -27,8 +33,10 @@ import Prelude
 
 -- $setup
 -- >>> :set -XOverloadedStrings
+-- >>> import Circuit (Circuit(..), reify)
 -- >>> import Circuit.IO.Queue
--- >>> import Control.Concurrent.STM (STM, atomically, newTQueueIO, readTQueue, writeTQueue, TQueue)
+-- >>> import Control.Arrow (Kleisli(..), runKleisli)
+-- >>> import Control.Concurrent.STM (STM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
 
 -- ---------------------------------------------------------------------------
 -- Queue strategies
@@ -117,6 +125,46 @@ queueEnds qu =
       q <- newTBQueue (fromIntegral n)
       let write x = writeTBQueue q x <|> (tryReadTBQueue q *> write x)
       pure (write, readTBQueue q)
+
+-- ---------------------------------------------------------------------------
+-- Cap & cup (compact closed)
+-- ---------------------------------------------------------------------------
+
+-- | Create a dual pair: push end and pop end sharing a single STM channel.
+--
+-- This is the cap @η : I → A* ⊗ A@ from compact closed categories:
+-- the two ends are duals connected through the same underlying channel.
+-- The queue strategy parameterises what \"connected\" means —
+-- unbounded, bounded (backpressure), single-slot (overwrite), etc.
+--
+-- >>> (pushA, popA) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
+-- >>> runKleisli (reify pushA) 42
+-- ()
+-- >>> runKleisli (reify popA) ()
+-- 42
+makeQueue :: Queue a -> IO (Circuit (Kleisli IO) (,) a (), Circuit (Kleisli IO) (,) () a)
+makeQueue q = do
+  (write, read') <- atomically (queueEnds q)
+  let push' = Lift $ Kleisli $ \a -> atomically (write a)
+      pop'  = Lift $ Kleisli $ \() -> atomically read'
+  pure (push', pop')
+
+-- | Connect a pop end to a push end.
+--
+-- This is the cup @ε : A* ⊗ A → I@. The pop end produces a value,
+-- the push end consumes it. They can be from different channels —
+-- this feeds values from one queue into another.
+--
+-- @glueC popA pushB = popA >>> pushB@
+--
+-- >>> (pushA, popA) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
+-- >>> (pushB, popB) <- makeQueue (Bounded 2) :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
+-- >>> runKleisli (reify pushA) 1  -- feed value into queue A
+-- >>> runKleisli (reify (glueC popA pushB)) ()  -- move from A to B
+-- >>> runKleisli (reify popB) ()
+-- 1
+glueC :: Circuit (Kleisli IO) (,) () a -> Circuit (Kleisli IO) (,) a () -> Circuit (Kleisli IO) (,) () ()
+glueC popC pushC = Compose pushC popC
 
 -- ---------------------------------------------------------------------------
 -- Feed / drain
