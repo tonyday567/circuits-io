@@ -58,6 +58,7 @@ library
     Circuit.IO.Time
     Circuit.IO.Websocket
     Circuit.IO.Websocket.Example
+    Circuit.Queue
 
   build-depends:
     base >=4.18 && <5,
