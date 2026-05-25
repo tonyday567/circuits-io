@@ -13,7 +13,6 @@ module Circuit.IO.Queue
 
     -- * Cap & cup (compact closed)
     makeQueue,
-    glueC,
 
     -- * Feed / drain
     feedQueue,
@@ -149,22 +148,20 @@ makeQueue q = do
       pop'  = Lift $ Kleisli $ \() -> atomically read'
   pure (push', pop')
 
--- | Connect a pop end to a push end.
+-- | Connect two channels by composing pop into push.
 --
--- This is the cup @ε : A* ⊗ A → I@. The pop end produces a value,
--- the push end consumes it. They can be from different channels —
--- this feeds values from one queue into another.
+-- The cup @ε : A* ⊗ A → I@ is just @(>>>)@:
+-- @popA >>> pushB@ feeds values from queue A into queue B.
 --
--- @glueC popA pushB = popA >>> pushB@
+-- Full pipeline: produce a value, push into A, pop from A,
+-- push into B, pop from B — all in one @reify@.
 --
+-- >>> import Control.Category ((>>>))
 -- >>> (pushA, popA) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
--- >>> (pushB, popB) <- makeQueue (Bounded 2) :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
--- >>> runKleisli (reify pushA) 1  -- feed value into queue A
--- >>> runKleisli (reify (glueC popA pushB)) ()  -- move from A to B
--- >>> runKleisli (reify popB) ()
--- 1
-glueC :: Circuit (Kleisli IO) (,) () a -> Circuit (Kleisli IO) (,) a () -> Circuit (Kleisli IO) (,) () ()
-glueC popC pushC = Compose pushC popC
+-- >>> (pushB, popB) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
+-- >>> let pipe = Lift (Kleisli $ \\() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
+-- >>> runKleisli (reify pipe) ()
+-- 7
 
 -- ---------------------------------------------------------------------------
 -- Feed / drain
