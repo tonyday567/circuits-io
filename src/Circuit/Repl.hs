@@ -202,15 +202,15 @@ readLines fp = withFile fp ReadMode $ \h ->
 -- | Read all new lines from the REPL as a 'Circuit'.
 --
 -- Composes with other 'Circuit (Kleisli IO)' fragments via '(>>>)'.
-replRead :: Repl -> Circuit (Kleisli IO) (,) () [Text]
+replRead :: Repl -> Circuit (Kleisli IO) t () [Text]
 replRead r = Lift $ Kleisli $ \() -> replEmit r
 
 -- | Write one line to the REPL as a 'Circuit'.
-replWrite :: Repl -> Circuit (Kleisli IO) (,) Text ()
+replWrite :: Repl -> Circuit (Kleisli IO) t Text ()
 replWrite r = Lift $ Kleisli $ replCommit r
 
 -- | Write multiple lines to the REPL as a 'Circuit'.
-replWriteLines :: Repl -> Circuit (Kleisli IO) (,) [Text] ()
+replWriteLines :: Repl -> Circuit (Kleisli IO) t [Text] ()
 replWriteLines r = Lift $ Kleisli $ mapM_ (replCommit r)
 
 -- ---------------------------------------------------------------------------

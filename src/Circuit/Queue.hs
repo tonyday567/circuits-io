@@ -1,14 +1,14 @@
 -- | Queue strategies and ends for circuits — pure and STM.
 --
 -- The 'Queue' type describes buffering semantics (Unbounded, Bounded,
--- Single, Latest, Newest, New).  Two families of ends:
+-- Single, Latest, Newest).  Two families of ends:
 --
--- * 'endsSTM' — STM mutables, blocking reads, for IO pipelines via 'makeQueue'.
--- * 'endsPure' — pure @[a]@ state, 'Bool'/'Maybe' for partiality, for pure circuits.
+-- * 'endsSTM' — STM mutables, blocking reads.
+-- * 'endsPure' — pure @[a]@ state, 'Bool'/'Maybe' for partiality.
 --
--- Circuit lifters ('writeC', 'readC', 'pushC', 'popC', 'pushDrop', 'popMaybe')
--- convert the pure ends into 'Circuit's.  The bare FIFO 'push' and 'pop' operate
--- directly on @([a], payload)@ pairs.
+-- 'endsQueue' creates a dual pair of circuit ends sharing an STM channel.
+-- 'push' and 'pop' lift pure ends into 'Circuit's with state threaded
+-- through the tensor.  All four are polymorphic in the tensor @t@.
 module Circuit.Queue
   ( -- * Queue strategies
     Queue (..),
@@ -18,30 +18,23 @@ module Circuit.Queue
     endsPure,
 
     -- * Circuit ends (STM)
-    makeQueue,
+    endsQueue,
     closeQueue,
 
-    -- * Circuit lifters (pure)
-    writeC,
-    readC,
-    pushC,
-    popC,
-    pushDrop,
-    popMaybe,
+    -- * Type aliases
+    WireK,
+    Emit,
+    Commit,
 
-    -- * Bare FIFO
+    -- * State-threading lifters
     push,
     pop,
-
-    -- * Concurrent execution
-    runConcurrently,
   )
 where
 
 import Circuit (Circuit (..))
 import Control.Applicative
 import Control.Arrow (Kleisli (..))
-import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.STM
 import Prelude
 
@@ -52,6 +45,21 @@ import Prelude
 -- >>> import Control.Arrow (Kleisli(..), runKleisli)
 -- >>> import Control.Category ((>>>))
 -- >>> import Control.Concurrent.STM (STM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
+
+-- ---------------------------------------------------------------------------
+-- Type aliases
+-- ---------------------------------------------------------------------------
+
+-- | A wire over 'Kleisli' @m@ with the @(,)@ tensor, by convention.
+-- 'endsQueue' and 'closeQueue' are polymorphic in the tensor; this alias
+-- pins it for readability.
+type WireK m = Circuit (Kleisli m) (,)
+
+-- | Emit elements of type @a@.
+type Emit m a = WireK m () a
+
+-- | Commit elements of type @a@.
+type Commit m a = WireK m a ()
 
 -- ---------------------------------------------------------------------------
 -- Queue strategies
@@ -115,10 +123,6 @@ endsSTM = \case
 -- All strategies operate on a @[a]@ buffer.  'Bool' signals write
 -- acceptance; 'Maybe' signals value availability.
 --
--- @
--- endsPure :: Queue a -> (a -> [a] -> ([a], Bool), [a] -> ([a], Maybe a))
--- @
---
 -- >>> let (write, read) = endsPure Unbounded
 -- >>> let (b1, _) = write 1 []
 -- >>> let (b2, _) = write 2 b1
@@ -150,92 +154,57 @@ endsPure = \case
     )
 
 -- ---------------------------------------------------------------------------
--- Cap (compact closed) — STM
+-- State-threading lifters
+-- ---------------------------------------------------------------------------
+
+-- | Push to state, returning 'Bool'.
+-- 'False' signals rejection (e.g. bounded queue full).
+--
+-- Bare FIFO via 'endsPure' (note: 'flip' to match state-first order):
+--
+-- >>> let qpush = push (flip (fst (endsPure Unbounded)))
+-- >>> reify (qpush :: Circuit (->) (,) ([Int], Int) ([Int], Bool)) ([], 1)
+-- ([1],True)
+push :: (s -> a -> (s, Bool)) -> Circuit (->) t (s, a) (s, Bool)
+push f = Lift (uncurry f)
+
+-- | Pop from state, returning 'Maybe' a.
+-- 'Nothing' signals empty.
+--
+-- Bare FIFO via 'endsPure':
+--
+-- >>> let qpop = pop (snd (endsPure Unbounded))
+-- >>> reify (qpop :: Circuit (->) (,) ([Int], ()) ([Int], Maybe Int)) ([1,2,3], ())
+-- ([2,3],Just 1)
+-- >>> reify (qpop :: Circuit (->) (,) ([Int], ()) ([Int], Maybe Int)) ([], ())
+-- ([],Nothing)
+pop :: (s -> (s, Maybe a)) -> Circuit (->) t (s, ()) (s, Maybe a)
+pop f = Lift (\(s, ()) -> f s)
+
+-- ---------------------------------------------------------------------------
+-- STM queue ends
 -- ---------------------------------------------------------------------------
 
 -- | Create a dual pair: push end and pop end sharing a single STM channel.
 --
--- The cap @η : I → A* ⊗ A@ from compact closed categories.
--- The queue strategy parameterises what "connected" means.
+-- Use 'WireK' to pin the tensor for readability:
 --
--- >>> (pushA, popA) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
--- >>> (pushB, popB) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
+-- >>> (pushA, popA) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
+-- >>> (pushB, popB) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
 -- >>> let pipe = Lift (Kleisli $ \() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
 -- >>> runKleisli (reify pipe) ()
 -- 7
-makeQueue :: Queue a -> IO (Circuit (Kleisli IO) (,) a (), Circuit (Kleisli IO) (,) () a)
-makeQueue q = do
-  (write, read') <- atomically (endsSTM q)
-  let push' = Lift $ Kleisli $ \a -> atomically (write a)
-      pop' = Lift $ Kleisli $ \() -> atomically read'
-  pure (push', pop')
+endsQueue :: Queue a -> STM (Circuit (Kleisli IO) t a (), Circuit (Kleisli IO) t () a)
+endsQueue q = do
+  (write, read') <- endsSTM q
+  pure (Lift (Kleisli (atomically . write)), Lift (Kleisli (\() -> atomically read')))
 
 -- | Plug a push end and a pop end together into a single circuit.
 --
 -- This is the extrinsic analogue of 'Circuit.Ends.close': two ends
 -- that share an STM channel are composed into @Circuit a a@.
 closeQueue ::
-  Circuit (Kleisli IO) (,) a () ->
-  Circuit (Kleisli IO) (,) () a ->
-  Circuit (Kleisli IO) (,) a a
+  Circuit (Kleisli IO) t a () ->
+  Circuit (Kleisli IO) t () a ->
+  Circuit (Kleisli IO) t a a
 closeQueue push' pop' = Compose pop' push'
-
--- ---------------------------------------------------------------------------
--- Circuit lifters (pure)
--- ---------------------------------------------------------------------------
-
--- | Write end as a Circuit.  'Bool' = write accepted?
-writeC :: (s -> a -> (s, Bool)) -> Circuit (->) (,) (s, a) (s, Bool)
-writeC f = Lift (uncurry f)
-
--- | Read end as a Circuit.  'Maybe' a = value available?
-readC :: (s -> (s, Maybe a)) -> Circuit (->) (,) (s, ()) (s, Maybe a)
-readC f = Lift (\(s, ()) -> f s)
-
--- | Write end that errors on rejection (Bounded-full, Single-occupied).
--- Collapses 'Bool' into @()@, matching the 'push' signature.
-pushC :: (s -> a -> (s, Bool)) -> Circuit (->) (,) (s, a) (s, ())
-pushC f = Lift $ \(s, a) -> case f s a of
-  (s', True) -> (s', ())
-  (_, False) -> error "pushC: rejected"
-
--- | Read end that errors on empty.
--- Collapses 'Maybe' a into a, matching the 'pop' signature.
-popC :: (s -> (s, Maybe a)) -> Circuit (->) (,) (s, ()) (s, a)
-popC f = Lift $ \(s, ()) -> case f s of
-  (s', Just a) -> (s', a)
-  (_, Nothing) -> error "popC: empty"
-
--- | Push that silently drops on rejection (Bounded-full → discard).
-pushDrop :: (s -> a -> (s, Bool)) -> Circuit (->) (,) (s, a) (s, ())
-pushDrop f = Lift $ \(s, a) -> case f s a of
-  (s', True) -> (s', ())
-  (s', False) -> (s', ())
-
--- | Pop that returns 'Nothing' on empty instead of erroring.
-popMaybe :: (s -> (s, Maybe a)) -> Circuit (->) (,) (s, ()) (s, Maybe a)
-popMaybe = readC
-
--- ---------------------------------------------------------------------------
--- Bare FIFO
--- ---------------------------------------------------------------------------
-
--- | Enqueue: push a value onto the buffer, return @()@.
---
--- >>> reify push ([], 1)
--- ([1],())
-push :: Circuit (->) (,) ([a], a) ([a], ())
-push = Lift $ \(buf, a) -> (buf ++ [a], ())
-
--- | Dequeue: pop a value from the buffer.
---
--- >>> reify pop ([1,2], ())
--- ([2],1)
-pop :: Circuit (->) (,) ([a], ()) ([a], a)
-pop = Lift $ \(buf, ()) -> case buf of
-  [] -> error "pop: empty"
-  x : xs -> (xs, x)
-
--- | Run two IO actions concurrently, returning both results.
-runConcurrently :: IO a -> IO b -> IO (a, b)
-runConcurrently = concurrently
