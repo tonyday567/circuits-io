@@ -51,6 +51,7 @@ library
     Circuit.Queue
     Circuit.Repl
     Circuit.Socket
+    Circuit.Step
     Circuit.Time
 
   build-depends:
