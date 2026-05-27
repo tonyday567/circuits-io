@@ -19,6 +19,7 @@ module Circuit.Queue
 
     -- * Circuit ends (STM)
     makeQueue,
+    closeQueue,
 
     -- * Circuit lifters (pure)
     writeC,
@@ -31,10 +32,6 @@ module Circuit.Queue
     -- * Bare FIFO
     push,
     pop,
-
-    -- * Feed / drain (STM)
-    feedQueue,
-    drainQueue,
 
     -- * Concurrent execution
     runConcurrently,
@@ -62,12 +59,16 @@ import Prelude
 
 -- | How messages are queued between producer and consumer.
 data Queue a
-  = Unbounded       -- ^ Unbounded FIFO queue.
-  | Bounded Int     -- ^ Bounded FIFO with backpressure (write blocks when full).
-  | Single          -- ^ Single-slot buffer (write overwrites, read empties).
-  | Latest a        -- ^ Always holds the latest value (overwrites, never blocks).
-  | Newest Int      -- ^ Like 'Bounded' but drops oldest when full.
-  | New             -- ^ Single-slot, only delivers new values (drop pending).
+  = -- | Unbounded FIFO queue.
+    Unbounded
+  | -- | Bounded FIFO with backpressure (write blocks when full).
+    Bounded Int
+  | -- | Single-slot buffer (write overwrites, read empties).
+    Single
+  | -- | Always holds the latest value (overwrites, never blocks).
+    Latest a
+  | -- | Like 'Bounded' but drops oldest when full.
+    Newest Int
   deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -100,9 +101,6 @@ endsSTM = \case
   Latest a -> do
     t <- newTVar a
     pure (writeTVar t, readTVar t)
-  New -> do
-    m <- newEmptyTMVar
-    pure (\x -> tryTakeTMVar m *> putTMVar m x, takeTMVar m)
   Newest n -> do
     q <- newTBQueue (fromIntegral n)
     let write x = writeTBQueue q x <|> (tryReadTBQueue q *> write x)
@@ -129,30 +127,26 @@ endsSTM = \case
 endsPure :: Queue a -> (a -> [a] -> ([a], Bool), [a] -> ([a], Maybe a))
 endsPure = \case
   Unbounded ->
-    ( \x buf -> (buf ++ [x], True)
-    , \case []   -> ([], Nothing); x:xs -> (xs, Just x)
+    ( \x buf -> (buf ++ [x], True),
+      \case [] -> ([], Nothing); x : xs -> (xs, Just x)
     )
   Bounded n ->
-    ( \x buf -> if length buf < n then (buf ++ [x], True) else (buf, False)
-    , \case []   -> ([], Nothing); x:xs -> (xs, Just x)
+    ( \x buf -> if length buf < n then (buf ++ [x], True) else (buf, False),
+      \case [] -> ([], Nothing); x : xs -> (xs, Just x)
     )
   Single ->
-    ( \x _ -> ([x], True)
-    , \case []   -> ([], Nothing); x:_ -> ([], Just x)
+    ( \x _ -> ([x], True),
+      \case [] -> ([], Nothing); x : _ -> ([], Just x)
     )
   Latest d ->
-    ( \x _ -> ([x], True)
-    , \buf -> (buf, Just (if null buf then d else head buf))
+    ( \x _ -> ([x], True),
+      \buf -> (buf, Just (case buf of x : _ -> x; [] -> d))
     )
   Newest n ->
     ( \x buf ->
         let buf' = buf ++ [x]
-        in if length buf' <= n then (buf', True) else (drop 1 buf', True)
-    , \case []   -> ([], Nothing); x:xs -> (xs, Just x)
-    )
-  New ->
-    ( \x _ -> ([x], True)
-    , \case []   -> ([], Nothing); x:_ -> ([], Just x)
+         in if length buf' <= n then (buf', True) else (drop 1 buf', True),
+      \case [] -> ([], Nothing); x : xs -> (xs, Just x)
     )
 
 -- ---------------------------------------------------------------------------
@@ -166,15 +160,25 @@ endsPure = \case
 --
 -- >>> (pushA, popA) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
 -- >>> (pushB, popB) <- makeQueue Unbounded :: IO (Circuit (Kleisli IO) (,) Int (), Circuit (Kleisli IO) (,) () Int)
--- >>> let pipe = Lift (Kleisli $ \\() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
+-- >>> let pipe = Lift (Kleisli $ \() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
 -- >>> runKleisli (reify pipe) ()
 -- 7
 makeQueue :: Queue a -> IO (Circuit (Kleisli IO) (,) a (), Circuit (Kleisli IO) (,) () a)
 makeQueue q = do
   (write, read') <- atomically (endsSTM q)
   let push' = Lift $ Kleisli $ \a -> atomically (write a)
-      pop'  = Lift $ Kleisli $ \() -> atomically read'
+      pop' = Lift $ Kleisli $ \() -> atomically read'
   pure (push', pop')
+
+-- | Plug a push end and a pop end together into a single circuit.
+--
+-- This is the extrinsic analogue of 'Circuit.Ends.close': two ends
+-- that share an STM channel are composed into @Circuit a a@.
+closeQueue ::
+  Circuit (Kleisli IO) (,) a () ->
+  Circuit (Kleisli IO) (,) () a ->
+  Circuit (Kleisli IO) (,) a a
+closeQueue push' pop' = Compose pop' push'
 
 -- ---------------------------------------------------------------------------
 -- Circuit lifters (pure)
@@ -192,20 +196,20 @@ readC f = Lift (\(s, ()) -> f s)
 -- Collapses 'Bool' into @()@, matching the 'push' signature.
 pushC :: (s -> a -> (s, Bool)) -> Circuit (->) (,) (s, a) (s, ())
 pushC f = Lift $ \(s, a) -> case f s a of
-  (s', True)  -> (s', ())
-  (_,  False) -> error "pushC: rejected"
+  (s', True) -> (s', ())
+  (_, False) -> error "pushC: rejected"
 
 -- | Read end that errors on empty.
 -- Collapses 'Maybe' a into a, matching the 'pop' signature.
 popC :: (s -> (s, Maybe a)) -> Circuit (->) (,) (s, ()) (s, a)
 popC f = Lift $ \(s, ()) -> case f s of
   (s', Just a) -> (s', a)
-  (_,  Nothing) -> error "popC: empty"
+  (_, Nothing) -> error "popC: empty"
 
 -- | Push that silently drops on rejection (Bounded-full → discard).
 pushDrop :: (s -> a -> (s, Bool)) -> Circuit (->) (,) (s, a) (s, ())
 pushDrop f = Lift $ \(s, a) -> case f s a of
-  (s', True)  -> (s', ())
+  (s', True) -> (s', ())
   (s', False) -> (s', ())
 
 -- | Pop that returns 'Nothing' on empty instead of erroring.
@@ -229,39 +233,8 @@ push = Lift $ \(buf, a) -> (buf ++ [a], ())
 -- ([2],1)
 pop :: Circuit (->) (,) ([a], ()) ([a], a)
 pop = Lift $ \(buf, ()) -> case buf of
-  []   -> error "pop: empty"
-  x:xs -> (xs, x)
-
--- ---------------------------------------------------------------------------
--- Feed / drain (STM)
--- ---------------------------------------------------------------------------
-
--- | Write a list of values into a 'TQueue'.
---
--- >>> q <- newTQueueIO :: IO (TQueue Int)
--- >>> feedQueue q [1, 2, 3]
--- >>> atomically (readTQueue q)
--- 1
-feedQueue :: TQueue a -> [a] -> IO ()
-feedQueue q = mapM_ (atomically . writeTQueue q)
-
--- | Read up to @n@ values from a 'TQueue'.  Blocks on each read.
---
--- >>> q <- newTQueueIO :: IO (TQueue Int)
--- >>> feedQueue q [1, 2, 3]
--- >>> drainQueue q 2
--- [1,2]
-drainQueue :: TQueue a -> Int -> IO [a]
-drainQueue q n = go n []
-  where
-    go 0 acc = pure (reverse acc)
-    go k acc = do
-      x <- atomically (readTQueue q)
-      go (k - 1) (x : acc)
-
--- ---------------------------------------------------------------------------
--- Concurrent execution
--- ---------------------------------------------------------------------------
+  [] -> error "pop: empty"
+  x : xs -> (xs, x)
 
 -- | Run two IO actions concurrently, returning both results.
 runConcurrently :: IO a -> IO b -> IO (a, b)

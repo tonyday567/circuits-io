@@ -9,11 +9,11 @@ author: Tony Day
 maintainer: tonyday567@gmail.com
 homepage: https://github.com/tonyday567/circuits#readme
 bug-reports: https://github.com/tonyday567/circuits/issues
-synopsis: IO combinators for the circuits library — fileIO, socket, server, timing, async
+synopsis: Channel decomposition and buffered IO for the circuits library
 description:
-  @circuits-io@ provides batteries-included IO combinators for the circuits library,
-  including file I/O, IORef, socket, server, timing, and async operations.
-  Built on Circuit.Channel's Producer/Consumer framework.
+  @circuits-io@ provides channel decomposition and buffered IO for the circuits library.
+  Three entry points: circuit feedback ('Circuit.Ends'), queue buffering ('Circuit.Queue'),
+  and external process communication ('Circuit.Repl', 'Circuit.Socket').
 
 build-type: Simple
 tested-with:
@@ -47,31 +47,21 @@ library
   import: ghc2024-stanza
   hs-source-dirs: src
   exposed-modules:
-    Circuit.Channel
-    Circuit.IO
-    Circuit.IO.File
-    Circuit.IO.Queue
-    Circuit.IO.Repl
-    Circuit.IO.Socket.Types
-    Circuit.IO.TCP
-    Circuit.IO.TCP.Example
-    Circuit.IO.Time
-    Circuit.IO.Websocket
-    Circuit.IO.Websocket.Example
+    Circuit.Ends
     Circuit.Queue
+    Circuit.Repl
+    Circuit.Socket
+    Circuit.Time
 
   build-depends:
     base >=4.18 && <5,
-    box >=0.9.3 && <0.10,
     bytestring >=0.11 && <0.13,
     circuits >=0.1.0.0,
     async >=2.2 && <3,
     stm >=2.5 && <3,
-    containers >=0.6 && <1,
     network-simple >=0.4 && <0.5,
     profunctors >=5.6 && <5.7,
     text >=2.0 && <3,
-    temporary >=1.3,
     directory >=1.3 && <1.4,
     process >=1.6 && <1.7,
     time >=1.12 && <2,

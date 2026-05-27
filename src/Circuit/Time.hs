@@ -2,7 +2,7 @@
 --
 -- Simple IO wrappers.  For 'Producer'/'Consumer' timing patterns,
 -- compose with 'Circuit.Perf' primitives.
-module Circuit.IO.Time
+module Circuit.Time
   ( -- * Sleep
     sleep,
 
@@ -20,7 +20,7 @@ import Control.Concurrent
 import Data.Time
 
 -- $setup
--- >>> import Circuit.IO.Time
+-- >>> import Circuit.Time
 -- >>> import Data.Time (getCurrentTime)
 
 -- ---------------------------------------------------------------------------

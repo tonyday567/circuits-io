@@ -1,15 +1,22 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Dumb FIFO-based REPL primitives.
 --
--- Four operations on a 'Repl':
+-- Four raw operations on a 'Repl':
 --
 -- > replOpen   :: ReplConfig -> IO Repl
 -- > replClose  :: Repl -> IO ()
 -- > replCommit :: Repl -> Text -> IO ()
 -- > replEmit   :: Repl -> IO [Text]
 --
+-- Plus two 'Circuit' views for composition with the rest of @circuits-io@:
+--
+-- > replRead  :: Repl -> Circuit (Kleisli IO) (,) () [Text]
+-- > replWrite :: Repl -> Circuit (Kleisli IO) (,) Text ()
+--
 -- No callbacks, no listeners, no async machinery.  Just IO.
 -- Line-oriented text.  Cursor-based emission (no duplicate reads).
-module Circuit.IO.Repl
+module Circuit.Repl
   ( -- * Configuration
     ReplConfig (..),
     defaultReplConfig,
@@ -22,17 +29,33 @@ module Circuit.IO.Repl
     -- * Primitives
     replCommit,
     replEmit,
+
+    -- * Circuit views
+    replRead,
+    replWrite,
+    replWriteLines,
+
+    -- * Sync
+    replSync,
+    replSyncWith,
+    defaultPrompt,
   )
 where
 
+import Circuit (Circuit (..))
+import Control.Arrow (Kleisli (..))
+import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.IORef
+import Data.List (find)
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import qualified Data.Text.IO as TIO
-import Prelude
+import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import System.Directory (doesFileExist)
 import System.IO
 import System.Process
+import Prelude
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -171,3 +194,65 @@ readLines fp = withFile fp ReadMode $ \h ->
             line <- TIO.hGetLine h
             go (line : acc)
    in go []
+
+-- ---------------------------------------------------------------------------
+-- Circuit views
+-- ---------------------------------------------------------------------------
+
+-- | Read all new lines from the REPL as a 'Circuit'.
+--
+-- Composes with other 'Circuit (Kleisli IO)' fragments via '(>>>)'.
+replRead :: Repl -> Circuit (Kleisli IO) (,) () [Text]
+replRead r = Lift $ Kleisli $ \() -> replEmit r
+
+-- | Write one line to the REPL as a 'Circuit'.
+replWrite :: Repl -> Circuit (Kleisli IO) (,) Text ()
+replWrite r = Lift $ Kleisli $ replCommit r
+
+-- | Write multiple lines to the REPL as a 'Circuit'.
+replWriteLines :: Repl -> Circuit (Kleisli IO) (,) [Text] ()
+replWriteLines r = Lift $ Kleisli $ mapM_ (replCommit r)
+
+-- ---------------------------------------------------------------------------
+-- Sync — poll with backoff until prompt
+-- ---------------------------------------------------------------------------
+
+-- | Default prompt detector for GHCi-style REPLs.
+-- Matches @ghci> @, @λ> @, or any line ending in @> @.
+defaultPrompt :: Text -> Bool
+defaultPrompt t = "ghci> " `T.isSuffixOf` t || "λ> " `T.isSuffixOf` t || "> " `T.isSuffixOf` t
+
+-- | Synchronously collect REPL output until a prompt is detected.
+--
+-- Polls with exponential backoff (10ms → 500ms cap).  Default timeout is
+-- 30 seconds.  Returns 'Nothing' if the timeout fires before a prompt.
+--
+-- This is the primitive for request/response interaction: commit a
+-- command, then 'replSync' to collect the response up to the next prompt.
+replSync :: Repl -> IO (Maybe [Text])
+replSync = replSyncWith defaultPrompt 30000000
+
+-- | General sync with custom prompt detector and timeout.
+--
+-- The detector is applied to each line returned by 'replEmit'.  Output
+-- is accumulated across polls.  When a matching line is found, the
+-- function returns 'Just' everything up to and including that prompt line.
+--
+-- If the timeout (in microseconds) fires first, returns 'Nothing'.
+replSyncWith :: (Text -> Bool) -> Int -> Repl -> IO (Maybe [Text])
+replSyncWith isPrompt timeoutUs r = go 0 [] 10000
+  where
+    go elapsed acc delay = do
+      newLines <- replEmit r
+      let acc' = acc ++ newLines
+          foundPrompt = isJust (find isPrompt newLines)
+      if foundPrompt
+        then pure (Just acc')
+        else do
+          let elapsed' = elapsed + delay
+          if elapsed' >= timeoutUs
+            then pure Nothing
+            else do
+              threadDelay delay
+              let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
+              go elapsed' acc' delay'
