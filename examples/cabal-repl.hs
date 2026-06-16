@@ -29,13 +29,12 @@
 -- Or point it at a real project by changing the config.
 module Main where
 
+import Circuit.Repl
 import Control.Concurrent (threadDelay)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.IO (hPutStrLn, stderr)
-
-import Circuit.Repl
 
 main :: IO ()
 main = do
@@ -44,17 +43,18 @@ main = do
 
   -- Use the built mock-repl as a stand-in that produces GHCi-like output
   -- including startup guff. In real use, point at "cabal" "repl" in a project dir.
-  let cfg = defaultReplConfig
-        { replCommand = "./dist-newstyle/build/aarch64-osx/ghc-9.14.1/circuits-io-0.1.0.0/x/mock-repl/build/mock-repl/mock-repl"
-        , replArgs = ["--prompt=ghci> ", "--delay=10"]
-        , replWorkingDir = "."
-        }
+  let cfg =
+        defaultReplConfig
+          { replCommand = "./dist-newstyle/build/aarch64-osx/ghc-9.14.1/circuits-io-0.1.0.0/x/mock-repl/build/mock-repl/mock-repl",
+            replArgs = ["--prompt=ghci> ", "--delay=10"],
+            replWorkingDir = "."
+          }
 
   -- Start (or attach to) the REPL.
   -- For shared use by two agents at the same time, one does replOpen,
   -- the others do replAttach with the *same* config paths.
   r <- replOpen cfg
-  threadDelay 300000  -- let startup guff be written
+  threadDelay 300000 -- let startup guff be written
 
   -- Consume the initial prompt (this discards the build guff via sync).
   _ <- replSync r
@@ -121,7 +121,7 @@ main = do
 
   -- Round 2: Agent B "wakes", inspects the task, computes reply
   _ <- ghciCommand rB "taskFromA"
-  _ <- ghciCommand rB "let replyFromB = 55"  -- pretend computation of sum [1..10]
+  _ <- ghciCommand rB "let replyFromB = 55" -- pretend computation of sum [1..10]
   TIO.putStrLn "Agent B read task and posted reply"
 
   -- Round 3: Agent A checks the reply and "acknowledges"

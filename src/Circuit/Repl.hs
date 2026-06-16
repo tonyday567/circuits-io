@@ -55,6 +55,7 @@ module Circuit.Repl
     defaultPrompt,
 
     -- * GHCi / Cabal REPL conveniences
+
     -- | These filter startup "guff" (build profiles, configuring, Ok modules loaded, etc.)
     -- and provide clean command wrappers for interactive type chasing and pipeline
     -- exploration. See the cabal-repl example.
@@ -68,10 +69,10 @@ import Circuit (Circuit (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
+import Data.Char (isSpace)
 import Data.IORef
 import Data.List (find)
 import Data.Maybe (isJust)
-import Data.Char (isSpace)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -236,9 +237,10 @@ readLines fp = do
   let parts = T.splitOn "\n" content
   -- If the file ends with \n, the last part is empty; drop it for "full lines".
   -- But we *keep* a non-empty last part even without \n (the partial/prompt line).
-  pure $ if not (T.null content) && T.isSuffixOf "\n" content
-         then filter (not . T.null) parts   -- or keep empties if wanted; here we drop trailing empty
-         else parts
+  pure $
+    if not (T.null content) && T.isSuffixOf "\n" content
+      then filter (not . T.null) parts -- or keep empties if wanted; here we drop trailing empty
+      else parts
 
 -- ---------------------------------------------------------------------------
 -- Circuit views
@@ -325,17 +327,17 @@ ghciCommand r cmd = do
 isGuff :: Text -> Bool
 isGuff t =
   or
-    [ "Build profile:" `T.isPrefixOf` t
-    , "In order, the following will be built" `T.isPrefixOf` t
-    , "Configuring library for" `T.isPrefixOf` t
-    , "Preprocessing library for" `T.isPrefixOf` t
-    , "Building library for" `T.isPrefixOf` t
-    , "GHCi, version" `T.isPrefixOf` t
-    , "Loaded GHCi configuration" `T.isPrefixOf` t
-    , "[1 of " `T.isPrefixOf` t && "] Compiling " `T.isInfixOf` t
-    , t == "Ok, modules loaded."
-    , "Leaving GHCi." `T.isPrefixOf` t
-    , T.all isSpace t
+    [ "Build profile:" `T.isPrefixOf` t,
+      "In order, the following will be built" `T.isPrefixOf` t,
+      "Configuring library for" `T.isPrefixOf` t,
+      "Preprocessing library for" `T.isPrefixOf` t,
+      "Building library for" `T.isPrefixOf` t,
+      "GHCi, version" `T.isPrefixOf` t,
+      "Loaded GHCi configuration" `T.isPrefixOf` t,
+      "[1 of " `T.isPrefixOf` t && "] Compiling " `T.isInfixOf` t,
+      t == "Ok, modules loaded.",
+      "Leaving GHCi." `T.isPrefixOf` t,
+      T.all isSpace t
     ]
 
 -- | Convenience: start a cabal repl in the given directory (or "."), wait
@@ -343,11 +345,12 @@ isGuff t =
 -- ready for 'ghciCommand'.
 startCabalRepl :: FilePath -> IO Repl
 startCabalRepl dir = do
-  let cfg = defaultReplConfig
-        { replCommand = "cabal"
-        , replArgs = ["repl"]
-        , replWorkingDir = dir
-        }
+  let cfg =
+        defaultReplConfig
+          { replCommand = "cabal",
+            replArgs = ["repl"],
+            replWorkingDir = dir
+          }
   r <- replOpen cfg
   -- consume the initial prompt / guff
   _ <- replSync r

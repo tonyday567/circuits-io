@@ -26,37 +26,38 @@ import System.Environment (getArgs)
 import System.IO (hFlush, stdout)
 
 data MockConfig = MockConfig
-  { prompt :: Text
-  , startupNoise :: [Text]
-  , responseDelayMs :: Int
-  , extraNoise :: Bool
-  , hangingPrompt :: Bool   -- if True, print prompt with putStr (no \n) to test partial-line reading
+  { prompt :: Text,
+    startupNoise :: [Text],
+    responseDelayMs :: Int,
+    extraNoise :: Bool,
+    hangingPrompt :: Bool -- if True, print prompt with putStr (no \n) to test partial-line reading
   }
 
 defaultConfig :: MockConfig
-defaultConfig = MockConfig
-  { prompt = "mock> "
-  , startupNoise =
-      [ "Mock REPL starting..."
-      , "Loading simulation environment..."
-      , "Ready."
-      ]
-  , responseDelayMs = 50
-  , extraNoise = True
-  , hangingPrompt = False
-  }
+defaultConfig =
+  MockConfig
+    { prompt = "mock> ",
+      startupNoise =
+        [ "Mock REPL starting...",
+          "Loading simulation environment...",
+          "Ready."
+        ],
+      responseDelayMs = 50,
+      extraNoise = True,
+      hangingPrompt = False
+    }
 
 parseArgs :: [String] -> MockConfig
 parseArgs = foldr go defaultConfig
   where
     go arg cfg
-      | "--prompt=" `T.isPrefixOf` t = cfg { prompt = T.strip (T.drop 9 t) <> " " }
+      | "--prompt=" `T.isPrefixOf` t = cfg {prompt = T.strip (T.drop 9 t) <> " "}
       | "--delay=" `T.isPrefixOf` t =
           case reads (T.unpack $ T.drop 8 t) of
-            [(n, "")] -> cfg { responseDelayMs = n }
+            [(n, "")] -> cfg {responseDelayMs = n}
             _ -> cfg
-      | "--no-extra-noise" == t = cfg { extraNoise = False }
-      | "--hanging-prompt" == t = cfg { hangingPrompt = True }
+      | "--no-extra-noise" == t = cfg {extraNoise = False}
+      | "--hanging-prompt" == t = cfg {hangingPrompt = True}
       | otherwise = cfg
       where
         t = T.pack arg
@@ -96,7 +97,7 @@ loop cfg counter = do
     let response = case T.words trimmed of
           ["add", n] ->
             let val = counter + read (T.unpack n) :: Int
-            in "result: " <> T.pack (show val)
+             in "result: " <> T.pack (show val)
           ["get"] -> "counter: " <> T.pack (show counter)
           _ -> "echo: " <> trimmed
 
