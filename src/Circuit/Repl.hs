@@ -14,6 +14,19 @@
 -- > replRead  :: Repl -> Circuit (Kleisli IO) (,) () [Text]
 -- > replWrite :: Repl -> Circuit (Kleisli IO) (,) Text ()
 --
+-- The implementation is developed and tested against the controllable
+-- mock-repl in test/mock-repl (see the test suite). This lets us reproduce
+-- the awkward attributes of real REPLs (noisy startup, hanging prompts without
+-- trailing \n, incremental output, extra chatter, state) in a deterministic way
+-- before wiring to real targets like cabal repl or agent processes (pi, hermes, flip etc.).
+--
+-- Parking note (as of this session): side-activity has moved to the main
+-- `circuits` package. All REPL/agent-comm primitives, the mock, the ghci
+-- helpers, attach for sharing, and the bidirectional multi-round comms thread
+-- are safely contained here in circuits-io. See the TODO near startCabalRepl
+-- and the dedicated section in readme.md. We have the primitives but have not
+-- yet exercised true automated multi-round agent-to-agent back-and-forth.
+--
 -- No callbacks, no listeners, no async machinery.  Just IO.
 -- Line-oriented text.  Cursor-based emission (no duplicate reads).
 module Circuit.Repl
@@ -25,6 +38,7 @@ module Circuit.Repl
     Repl,
     replOpen,
     replClose,
+    replAttach,
 
     -- * Primitives
     replCommit,
@@ -39,6 +53,14 @@ module Circuit.Repl
     replSync,
     replSyncWith,
     defaultPrompt,
+
+    -- * GHCi / Cabal REPL conveniences
+    -- | These filter startup "guff" (build profiles, configuring, Ok modules loaded, etc.)
+    -- and provide clean command wrappers for interactive type chasing and pipeline
+    -- exploration. See the cabal-repl example.
+    ghciCommand,
+    isGuff,
+    startCabalRepl,
   )
 where
 
@@ -49,6 +71,7 @@ import Control.Monad (unless)
 import Data.IORef
 import Data.List (find)
 import Data.Maybe (isJust)
+import Data.Char (isSpace)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -100,7 +123,7 @@ defaultReplConfig =
 -- that has arrived since the last call.
 data Repl = Repl
   { replConfig :: ReplConfig,
-    replProcessHandle :: ProcessHandle,
+    replProcessHandle :: Maybe ProcessHandle,
     replCursor :: IORef Int
   }
 
@@ -147,14 +170,35 @@ replOpen cfg = do
   hClose stderrH
 
   cursor <- newIORef 0
-  pure $ Repl cfg ph cursor
+  pure $ Repl cfg (Just ph) cursor
+
+-- | Attach to an already-running REPL (e.g. one started by another agent or
+-- manually with the same FIFO paths). Does not spawn or manage the process
+-- lifetime. The cursor is initialized to the current end of the stdout log
+-- so subsequent 'replEmit' only sees new output.
+--
+-- This enables multiple clients (agents or humans) to share one REPL session:
+-- they all write to the same stdin FIFO (serialized by the OS), see the
+-- combined output in the log, and each maintains its own read cursor.
+--
+-- Use 'replClose' on an attached Repl is a no-op.
+replAttach :: ReplConfig -> IO Repl
+replAttach cfg = do
+  -- Do not create FIFO or spawn; assume caller has set up the process
+  -- reading the FIFO and logging output.
+  ls <- readLines (replStdoutPath cfg)
+  cursor <- newIORef (length ls)
+  pure $ Repl cfg Nothing cursor
 
 -- | Close a REPL session.
 --
--- Sends SIGTERM to the process.  The FIFO and log files are left
--- in place for inspection.
+-- Sends SIGTERM to the process (if this Repl owns it, i.e. was created via
+-- 'replOpen'). The FIFO and log files are left in place for inspection.
+-- For 'replAttach' sessions, this is a no-op.
 replClose :: Repl -> IO ()
-replClose = terminateProcess . replProcessHandle
+replClose r = case replProcessHandle r of
+  Just ph -> terminateProcess ph
+  Nothing -> pure ()
 
 -- ---------------------------------------------------------------------------
 -- Primitives
@@ -183,17 +227,18 @@ replEmit r = do
   writeIORef (replCursor r) (length ls)
   pure newLines
 
--- | Read all lines from a file.
+-- | Read all lines from a file, including a possible partial last line
+-- (common when REPLs print a prompt with putStr and no trailing newline).
+-- This is important for prompt detection on the hanging prompt line.
 readLines :: FilePath -> IO [Text]
-readLines fp = withFile fp ReadMode $ \h ->
-  let go acc = do
-        done <- hIsEOF h
-        if done
-          then pure (reverse acc)
-          else do
-            line <- TIO.hGetLine h
-            go (line : acc)
-   in go []
+readLines fp = do
+  content <- TIO.readFile fp
+  let parts = T.splitOn "\n" content
+  -- If the file ends with \n, the last part is empty; drop it for "full lines".
+  -- But we *keep* a non-empty last part even without \n (the partial/prompt line).
+  pure $ if not (T.null content) && T.isSuffixOf "\n" content
+         then filter (not . T.null) parts   -- or keep empties if wanted; here we drop trailing empty
+         else parts
 
 -- ---------------------------------------------------------------------------
 -- Circuit views
@@ -256,3 +301,64 @@ replSyncWith isPrompt timeoutUs r = go 0 [] 10000
               threadDelay delay
               let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
               go elapsed' acc' delay'
+
+-- ---------------------------------------------------------------------------
+-- GHCi / Cabal REPL helpers (filter guff, clean interactive use)
+-- ---------------------------------------------------------------------------
+
+-- | Send a line to the REPL and return the output produced up to (and not
+-- including) the next prompt. Common GHCi/cabal-repl "guff" (build profiles,
+-- configuring messages, "Ok, modules loaded.", etc.) is filtered.
+--
+-- This is the core primitive for the "interactive type trail" use case.
+ghciCommand :: Repl -> Text -> IO [Text]
+ghciCommand r cmd = do
+  replCommit r cmd
+  mLines <- replSync r
+  pure $ case mLines of
+    Nothing -> []
+    Just ls -> filter (not . isGuff) (takeWhile (not . defaultPrompt) ls)
+
+-- | Heuristic for lines that are just startup/build ceremony from cabal repl / ghci.
+-- These are the "usual guff" users want filtered when using the REPL as an
+-- interactive tool for type chasing and pipeline construction.
+isGuff :: Text -> Bool
+isGuff t =
+  or
+    [ "Build profile:" `T.isPrefixOf` t
+    , "In order, the following will be built" `T.isPrefixOf` t
+    , "Configuring library for" `T.isPrefixOf` t
+    , "Preprocessing library for" `T.isPrefixOf` t
+    , "Building library for" `T.isPrefixOf` t
+    , "GHCi, version" `T.isPrefixOf` t
+    , "Loaded GHCi configuration" `T.isPrefixOf` t
+    , "[1 of " `T.isPrefixOf` t && "] Compiling " `T.isInfixOf` t
+    , t == "Ok, modules loaded."
+    , "Leaving GHCi." `T.isPrefixOf` t
+    , T.all isSpace t
+    ]
+
+-- | Convenience: start a cabal repl in the given directory (or "."), wait
+-- for the initial prompt (discarding startup guff), and return a handle
+-- ready for 'ghciCommand'.
+startCabalRepl :: FilePath -> IO Repl
+startCabalRepl dir = do
+  let cfg = defaultReplConfig
+        { replCommand = "cabal"
+        , replArgs = ["repl"]
+        , replWorkingDir = dir
+        }
+  r <- replOpen cfg
+  -- consume the initial prompt / guff
+  _ <- replSync r
+  pure r
+
+-- TODO (open thread for bidirectional multi-round agent comms):
+-- We have replAttach + shared FIFO/logs for multiple clients.
+-- We have clean ghciCommand for filtered request/response.
+-- What we have *not* yet built is a higher-level "bus" or protocol that lets
+-- two (or more) agents do automated back-and-forth over multiple rounds
+-- (AgentA posts -> AgentB consumes/replies -> AgentA reacts ...), using the
+-- REPL log as the transcript, without the caller script doing the turn-taking.
+-- See examples/cabal-repl.hs (the simulation section) and readme.md for the
+-- current status and what to pick up when resuming work in circuits-io.
