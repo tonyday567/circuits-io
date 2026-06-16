@@ -14,7 +14,7 @@ module Circuit.Step
   )
 where
 
-import Circuit (Circuit (..))
+import Circuit (Circuit (..), reify)
 import Data.Maybe (fromMaybe)
 import Prelude hiding (filter, take)
 
@@ -29,11 +29,11 @@ import Prelude hiding (filter, take)
 take :: Int -> Circuit (->) Either s a -> Circuit (->) Either (Int, s) a
 take n = \case
   Lift f -> Lift (f . snd)
-  Knot body -> Knot $ \case
+  Knot body -> Knot $ Lift $ \case
     Left (i, f) -> go i (Left f)
     Right (i, s) -> go i (Right s)
     where
-      go i x = case body x of
+      go i x = case reify body x of
         Right a -> Right a
         Left x'
           | i > 1 -> Left (i - 1, x')
@@ -49,19 +49,19 @@ filter p = \case
       check a
         | p a = a
         | otherwise = error "filter: Lift rejected"
-  Knot body -> Knot $ \case
-    Left f -> case body (Left f) of
+  Knot body -> Knot $ Lift $ \case
+    Left f -> case reify body (Left f) of
       Right a
         | p a -> Right a
         | otherwise -> Left f
       Left f' -> Left f'
-    Right x -> case body (Right x) of
+    Right x -> case reify body (Right x) of
       Right a
         | p a -> Right a
         | otherwise -> retry x
       Left f' -> Left f'
     where
-      retry x = case body (Right x) of
+      retry x = case reify body (Right x) of
         Left f -> Left f
         Right _ -> error "filter: stuck (body returned same unwanted value)"
   Compose f g -> Compose (filter p f) g
@@ -71,17 +71,17 @@ filter p = \case
 compact :: Circuit (->) Either x (Maybe a) -> Circuit (->) Either x a
 compact = \case
   Lift f -> Lift (fmap (fromMaybe (error "compact: Lift returned Nothing")) f)
-  Knot body -> Knot $ \case
-    Left f -> case body (Left f) of
+  Knot body -> Knot $ Lift $ \case
+    Left f -> case reify body (Left f) of
       Right (Just a) -> Right a
       Right Nothing -> Left f
       Left f' -> Left f'
-    Right x -> case body (Right x) of
+    Right x -> case reify body (Right x) of
       Right (Just a) -> Right a
       Right Nothing -> retry x
       Left f' -> Left f'
     where
-      retry x = case body (Right x) of
+      retry x = case reify body (Right x) of
         Left f -> Left f
         Right Nothing -> error "compact: stuck (body returned Nothing again)"
         Right (Just a) -> Right a
