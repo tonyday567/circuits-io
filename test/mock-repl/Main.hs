@@ -84,7 +84,7 @@ loop :: MockConfig -> Int -> IO ()
 loop cfg counter = do
   line <- TIO.getLine
   let trimmed = T.strip line
-  when (not $ T.null trimmed) $ do
+  unless (T.null trimmed) $ do
     threadDelay (responseDelayMs cfg * 1000)
 
     -- Simulate "thinking" / multiple output lines

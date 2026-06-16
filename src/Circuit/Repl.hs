@@ -197,9 +197,7 @@ replAttach cfg = do
 -- 'replOpen'). The FIFO and log files are left in place for inspection.
 -- For 'replAttach' sessions, this is a no-op.
 replClose :: Repl -> IO ()
-replClose r = case replProcessHandle r of
-  Just ph -> terminateProcess ph
-  Nothing -> pure ()
+replClose r = Data.Foldable.for_ (replProcessHandle r) terminateProcess
 
 -- ---------------------------------------------------------------------------
 -- Primitives

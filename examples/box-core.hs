@@ -34,7 +34,7 @@ runE :: (Monad m) => Emitter m a -> m a
 runE e = runB e ()
 
 runC :: (Monad m) => Committer m a -> a -> m ()
-runC c a = runB c a
+runC = runB
 
 -- Unit: create a bidirectional channel from a value.
 --   The Emitter produces a, the Committer consumes a.
@@ -63,7 +63,7 @@ yield = Lift . Kleisli . const . pure
 
 -- | Consume a value with an effect.
 consume :: (Monad m) => (a -> m ()) -> Committer m a
-consume f = Lift (Kleisli (\a -> f a >> pure ()))
+consume f = Lift (Kleisli (\a -> Control.Monad.void (f a)))
 
 -- | Always accept.
 accept :: (Monad m) => Committer m a
