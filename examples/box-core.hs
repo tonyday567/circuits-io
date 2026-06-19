@@ -63,7 +63,7 @@ yield = Lift . Kleisli . const . pure
 
 -- | Consume a value with an effect.
 consume :: (Monad m) => (a -> m ()) -> Committer m a
-consume f = Lift (Kleisli (\a -> Control.Monad.void (f a)))
+consume f = Lift (Kleisli (Control.Monad.void . f))
 
 -- | Always accept.
 accept :: (Monad m) => Committer m a

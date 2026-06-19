@@ -53,7 +53,7 @@ module Circuit.Ends
   )
 where
 
-import Circuit (Trace (..), Co (..), Contra (..), close)
+import Circuit (Co (..), Contra (..), Trace (..), close)
 import Prelude hiding (id, (.))
 
 -- | @η@ — the unit of the companion/conjoint adjunction (pure case).
