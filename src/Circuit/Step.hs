@@ -14,12 +14,12 @@ module Circuit.Step
   )
 where
 
-import Circuit (Trace (..), reify)
+import Circuit (Trace (..), realise)
 import Data.Maybe (fromMaybe)
 import Prelude hiding (filter, take)
 
 -- $setup
--- >>> import Circuit (Trace(..), reify)
+-- >>> import Circuit (Trace(..), realise)
 -- >>> import Circuit.Step
 -- >>> :set -Wno-overlapping-patterns
 
@@ -33,7 +33,7 @@ take n = \case
     Left (i, f) -> go i (Left f)
     Right (i, s) -> go i (Right s)
     where
-      go i x = case reify body x of
+      go i x = case realise body x of
         Right a -> Right a
         Left x'
           | i > 1 -> Left (i - 1, x')
@@ -50,18 +50,18 @@ filter p = \case
         | p a = a
         | otherwise = error "filter: Lift rejected"
   Trace body -> Trace $ Lift $ \case
-    Left f -> case reify body (Left f) of
+    Left f -> case realise body (Left f) of
       Right a
         | p a -> Right a
         | otherwise -> Left f
       Left f' -> Left f'
-    Right x -> case reify body (Right x) of
+    Right x -> case realise body (Right x) of
       Right a
         | p a -> Right a
         | otherwise -> retry x
       Left f' -> Left f'
     where
-      retry x = case reify body (Right x) of
+      retry x = case realise body (Right x) of
         Left f -> Left f
         Right _ -> error "filter: stuck (body returned same unwanted value)"
   Compose f g -> Compose (filter p f) g
@@ -72,16 +72,16 @@ compact :: Trace Either (->) x (Maybe a) -> Trace Either (->) x a
 compact = \case
   Lift f -> Lift (fmap (fromMaybe (error "compact: Lift returned Nothing")) f)
   Trace body -> Trace $ Lift $ \case
-    Left f -> case reify body (Left f) of
+    Left f -> case realise body (Left f) of
       Right (Just a) -> Right a
       Right Nothing -> Left f
       Left f' -> Left f'
-    Right x -> case reify body (Right x) of
+    Right x -> case realise body (Right x) of
       Right (Just a) -> Right a
       Right Nothing -> retry x
       Left f' -> Left f'
     where
-      retry x = case reify body (Right x) of
+      retry x = case realise body (Right x) of
         Left f -> Left f
         Right Nothing -> error "compact: stuck (body returned Nothing again)"
         Right (Just a) -> Right a

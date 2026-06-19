@@ -40,7 +40,7 @@ import Prelude
 
 -- $setup
 -- >>> :set -XOverloadedStrings
--- >>> import Circuit (Trace(..), reify)
+-- >>> import Circuit (Trace(..), realise)
 -- >>> import Circuit.Queue
 -- >>> import Control.Arrow (Kleisli(..), runKleisli)
 -- >>> import Control.Category ((>>>))
@@ -163,7 +163,7 @@ endsPure = \case
 -- Bare FIFO via 'endsPure' (note: 'flip' to match state-first order):
 --
 -- >>> let qpush = push (flip (fst (endsPure Unbounded)))
--- >>> reify (qpush :: Trace (,) (->) ([Int], Int) ([Int], Bool)) ([], 1)
+-- >>> realise (qpush :: Trace (,) (->) ([Int], Int) ([Int], Bool)) ([], 1)
 -- ([1],True)
 push :: (s -> a -> (s, Bool)) -> Trace t (->) (s, a) (s, Bool)
 push f = Lift (uncurry f)
@@ -174,9 +174,9 @@ push f = Lift (uncurry f)
 -- Bare FIFO via 'endsPure':
 --
 -- >>> let qpop = pop (snd (endsPure Unbounded))
--- >>> reify (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([1,2,3], ())
+-- >>> realise (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([1,2,3], ())
 -- ([2,3],Just 1)
--- >>> reify (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([], ())
+-- >>> realise (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([], ())
 -- ([],Nothing)
 pop :: (s -> (s, Maybe a)) -> Trace t (->) (s, ()) (s, Maybe a)
 pop f = Lift (\(s, ()) -> f s)
@@ -192,7 +192,7 @@ pop f = Lift (\(s, ()) -> f s)
 -- >>> (pushA, popA) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
 -- >>> (pushB, popB) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
 -- >>> let pipe = Lift (Kleisli $ \() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
--- >>> runKleisli (reify pipe) ()
+-- >>> runKleisli (realise pipe) ()
 -- 7
 endsQueue :: Queue a -> STM (Trace t (Kleisli IO) a (), Trace t (Kleisli IO) () a)
 endsQueue q = do
