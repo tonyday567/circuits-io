@@ -1,52 +1,57 @@
 {-# LANGUAGE FlexibleInstances #-}
 
--- | Box: profunctor streaming with Circuit (Kleisli m) Either.
+-- | Box: profunctor streaming with Trace Either (Kleisli Identity).
 --
 --   Types:
---     Box m c e      = Circuit (Kleisli m) Either c e
---     Emitter m a    = Box m () a      — produces one a per step
---     Committer m a  = Box m a ()      — consumes one a per step
+--     Box c e        = Trace Either (Kleisli Identity) c e
+--     Emitter a      = Box () a      — produces one a per step
+--     Committer a    = Box a ()      — consumes one a per step
 --
---   The lowered form is a single step: c -> m e.
+--   The realised form is a single step: c -> e.
 --   Multi-step (streaming) is circuit composition, not function call.
 --
---   Unit creates a matched pair. Counit annihilates: lower . Compose.
+--   Unit creates a matched pair. Counit annihilates: runB . Compose.
+--
+--   Note: a generic @Monad m@ version is blocked by overlapping
+--   'Traced (Kleisli m) Either' instances in the current library
+--   (the IO-specific instance overlaps the general Monad instance).
+--   This example uses 'Identity' to stay pure and compile cleanly.
 module Box where
 
-import Circuit.Trace (Trace (..), reify)
+import Circuit.Trace (Trace (..), realise)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category ((.))
-import Data.Profunctor (Profunctor (dimap))
+import Data.Functor.Identity (Identity (..))
 import Prelude hiding (id, (.))
 
 -- Core types
-type Box m c e = Trace Either (Kleisli m) c e
+type Box c e = Trace Either (Kleisli Identity) c e
 
-type Emitter m a = Box m () a
+type Emitter a = Box () a
 
-type Committer m a = Box m a ()
+type Committer a = Box a ()
 
--- Lower: interpret to a monadic function (single step)
-runB :: (Monad m) => Box m c e -> c -> m e
-runB = runKleisli . reify
+-- Lower: interpret to a pure function (single step)
+runB :: Box c e -> c -> e
+runB b c = runIdentity (runKleisli (realise b) c)
 
-runE :: (Monad m) => Emitter m a -> m a
+runE :: Emitter a -> a
 runE e = runB e ()
 
-runC :: (Monad m) => Committer m a -> a -> m ()
+runC :: Committer a -> a -> ()
 runC = runB
 
 -- Unit: create a bidirectional channel from a value.
 --   The Emitter produces a, the Committer consumes a.
-unit :: (Monad m) => a -> (Emitter m a, Committer m a)
+unit :: a -> (Emitter a, Committer a)
 unit a = (Lift (Kleisli (const (pure a))), Lift (Kleisli (const (pure ()))))
 
 -- Counit: compose and run — the annihilator.
-counit :: (Monad m) => Committer m a -> Emitter m a -> m ()
+counit :: Committer a -> Emitter a -> ()
 counit c e = runB (Compose c e) ()
 
 -- Glue: convenience alias for counit
-glue :: (Monad m) => Committer m a -> Emitter m a -> m ()
+glue :: Committer a -> Emitter a -> ()
 glue = counit
 
 -- ---------------------------------------------------------------------------
@@ -54,17 +59,17 @@ glue = counit
 -- ---------------------------------------------------------------------------
 
 -- | Emit a single value and stop.
-yield :: (Monad m) => a -> Emitter m a
+yield :: a -> Emitter a
 yield = Lift . Kleisli . const . pure
 
 -- ---------------------------------------------------------------------------
 -- Committer combinators
 -- ---------------------------------------------------------------------------
 
--- | Consume a value with an effect.
-consume :: (Monad m) => (a -> m ()) -> Committer m a
-consume f = Lift (Kleisli (Control.Monad.void . f))
+-- | Consume a value.
+consume :: (a -> ()) -> Committer a
+consume f = Lift (Kleisli (Identity . f))
 
 -- | Always accept.
-accept :: (Monad m) => Committer m a
+accept :: Committer a
 accept = Lift (Kleisli (const (pure ())))
