@@ -65,11 +65,12 @@ module Circuit.Repl
   )
 where
 
-import Circuit (Circuit (..))
+import Circuit (Trace (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.Char (isSpace)
+import Data.Foldable (for_)
 import Data.IORef
 import Data.List (find)
 import Data.Maybe (isJust)
@@ -197,7 +198,7 @@ replAttach cfg = do
 -- 'replOpen'). The FIFO and log files are left in place for inspection.
 -- For 'replAttach' sessions, this is a no-op.
 replClose :: Repl -> IO ()
-replClose r = Data.Foldable.for_ (replProcessHandle r) terminateProcess
+replClose r = for_ (replProcessHandle r) terminateProcess
 
 -- ---------------------------------------------------------------------------
 -- Primitives
@@ -247,15 +248,15 @@ readLines fp = do
 -- | Read all new lines from the REPL as a 'Circuit'.
 --
 -- Composes with other 'Circuit (Kleisli IO)' fragments via '(>>>)'.
-replRead :: Repl -> Circuit (Kleisli IO) t () [Text]
+replRead :: Repl -> Trace t (Kleisli IO) () [Text]
 replRead r = Lift $ Kleisli $ \() -> replEmit r
 
--- | Write one line to the REPL as a 'Circuit'.
-replWrite :: Repl -> Circuit (Kleisli IO) t Text ()
+-- | Write one line to the REPL as a 'Trace'.
+replWrite :: Repl -> Trace t (Kleisli IO) Text ()
 replWrite r = Lift $ Kleisli $ replCommit r
 
--- | Write multiple lines to the REPL as a 'Circuit'.
-replWriteLines :: Repl -> Circuit (Kleisli IO) t [Text] ()
+-- | Write multiple lines to the REPL as a 'Trace'.
+replWriteLines :: Repl -> Trace t (Kleisli IO) [Text] ()
 replWriteLines r = Lift $ Kleisli $ mapM_ (replCommit r)
 
 -- ---------------------------------------------------------------------------

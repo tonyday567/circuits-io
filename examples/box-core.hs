@@ -13,14 +13,14 @@
 --   Unit creates a matched pair. Counit annihilates: lower . Compose.
 module Box where
 
-import Circuit.Circuit (Circuit (..), reify)
+import Circuit.Trace (Trace (..), reify)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category ((.))
 import Data.Profunctor (Profunctor (dimap))
 import Prelude hiding (id, (.))
 
 -- Core types
-type Box m c e = Circuit (Kleisli m) Either c e
+type Box m c e = Trace Either (Kleisli m) c e
 
 type Emitter m a = Box m () a
 
