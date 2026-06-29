@@ -47,9 +47,11 @@ library
   import: ghc2024-stanza
   hs-source-dirs: src
   exposed-modules:
+    Circuit.Comm
     Circuit.Ends
     Circuit.Queue
     Circuit.Repl
+    Circuit.Session
     Circuit.Socket
     Circuit.Step
     Circuit.Time
@@ -60,6 +62,7 @@ library
     circuits >=0.1.0.0,
     async >=2.2 && <3,
     stm >=2.5 && <3,
+    containers >=0.6 && <0.9,
     network-simple >=0.4 && <0.5,
     profunctors >=5.6 && <5.7,
     text >=2.0 && <3,
@@ -85,6 +88,19 @@ executable cabal-repl-example
   import: ghc2024-stanza
   hs-source-dirs: examples
   main-is: cabal-repl.hs
+  build-depends:
+    base >=4.18 && <5,
+    circuits-io,
+    text >=2.0 && <3
+  ghc-options:
+    -threaded
+    -rtsopts
+
+executable agent-bridge
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: examples
+  main-is: agent-bridge.hs
   build-depends:
     base >=4.18 && <5,
     circuits-io,

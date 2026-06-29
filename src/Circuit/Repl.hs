@@ -62,6 +62,11 @@ module Circuit.Repl
     ghciCommand,
     isGuff,
     startCabalRepl,
+
+    -- * Hermes agent conveniences
+    startAgent,
+    hermesPrompt,
+    hermesCommand,
   )
 where
 
@@ -233,13 +238,17 @@ replEmit r = do
 readLines :: FilePath -> IO [Text]
 readLines fp = do
   content <- TIO.readFile fp
-  let parts = T.splitOn "\n" content
-  -- If the file ends with \n, the last part is empty; drop it for "full lines".
-  -- But we *keep* a non-empty last part even without \n (the partial/prompt line).
-  pure $
-    if not (T.null content) && T.isSuffixOf "\n" content
-      then filter (not . T.null) parts -- or keep empties if wanted; here we drop trailing empty
-      else parts
+  -- Truly empty file → no lines (important for replAttach cursor correctness).
+  if T.null content
+    then pure []
+    else do
+      let parts = T.splitOn "\n" content
+      -- If the file ends with \n, the last part is empty; drop trailing empties.
+      -- But keep a non-empty last part without \n (the partial/prompt line).
+      pure $
+        if T.isSuffixOf "\n" content
+          then filter (not . T.null) parts
+          else parts
 
 -- ---------------------------------------------------------------------------
 -- Circuit views
@@ -355,12 +364,77 @@ startCabalRepl dir = do
   _ <- replSync r
   pure r
 
--- TODO (open thread for bidirectional multi-round agent comms):
--- We have replAttach + shared FIFO/logs for multiple clients.
--- We have clean ghciCommand for filtered request/response.
--- What we have *not* yet built is a higher-level "bus" or protocol that lets
--- two (or more) agents do automated back-and-forth over multiple rounds
--- (AgentA posts -> AgentB consumes/replies -> AgentA reacts ...), using the
--- REPL log as the transcript, without the caller script doing the turn-taking.
--- See examples/cabal-repl.hs (the simulation section) and readme.md for the
--- current status and what to pick up when resuming work in circuits-io.
+-- ---------------------------------------------------------------------------
+-- Hermes agent helpers
+-- ---------------------------------------------------------------------------
+
+-- | Hermes prompt: the leading @❯@ character.
+hermesPrompt :: Text -> Bool
+hermesPrompt t = "❯" `T.isPrefixOf` (T.stripStart t)
+
+-- | Send a prompt to a Hermes agent and return the clean response.
+--
+-- Commits the line, waits for the next @❯@ prompt, and filters
+-- out ANSI escape sequences, status bars, and other guff.
+hermesCommand :: Repl -> Text -> IO [Text]
+hermesCommand r cmd = do
+  replCommit r cmd
+  mLines <- replSyncWith hermesPrompt 120000000 r  -- 2 minute timeout
+  pure $ case mLines of
+    Nothing -> []
+    Just ls -> filter (not . isHermesGuff) (takeWhile (not . hermesPrompt) ls)
+
+-- | Heuristic for Hermes UI lines that aren't actual response content.
+isHermesGuff :: Text -> Bool
+isHermesGuff t =
+  or
+    [ "Warning:" `T.isPrefixOf` t,
+      "╭─" `T.isPrefixOf` t,
+      "╰─" `T.isPrefixOf` t,
+      "│" `T.isPrefixOf` t,
+      "Available Tools" `T.isInfixOf` t,
+      "Available Skills" `T.isInfixOf` t,
+      "Session:" `T.isPrefixOf` t,
+      "Resume this session" `T.isPrefixOf` t,
+      "⚕" `T.isPrefixOf` (T.stripStart t),
+      "✦ Tip:" `T.isPrefixOf` t,
+      T.all isSpace t,
+      T.null t
+    ]
+
+-- | Start a Hermes agent connected to a FIFO.
+--
+-- Spawns @hermes chat --quiet@, waits for it to finish printing
+-- the startup banner and first prompt, and returns a 'Repl' handle
+-- ready for 'hermesCommand'.
+startAgent :: FilePath -> IO Repl
+startAgent workDir = do
+  let cfg =
+        defaultReplConfig
+          { replCommand = "hermes",
+            replArgs = ["chat", "--quiet", "--max-turns", "50"],
+            replWorkingDir = workDir,
+            replStdinPath = "/tmp/agent-stdin",
+            replStdoutPath = "/tmp/agent-stdout.md",
+            replStderrPath = "/tmp/agent-stderr.md"
+          }
+  r <- replOpen cfg
+  -- Consume startup guff: banner, tool list, welcome message, first prompt.
+  _ <- replSyncWith hermesPrompt 60000000 r  -- 60 second timeout
+  pure r
+
+-- TODO (open thread for Circuit.Agent integration):
+-- We now have:
+--   * Circuit.Repl  — FIFO-based process communication primitives
+--   * Circuit.Comm  — multi-agent channel (shared FIFO+log, cursors)
+--   * Circuit.Session — ask/answer protocol with blocking replies
+--
+-- What remains: integrate with the coinductive Agent pattern
+-- (loom/circuit-agent.md).  An Agent is @Path -> (Text, Agent)@ —
+-- a self-updating closure consuming an append-only log.  Session
+-- provides the operational layer; Agent provides the structure for
+-- agents that update their behavior based on conversation history.
+--
+-- The natural bridge: a 'sessionAgent' function that lifts a Session
+-- into the Agent coinductive form, enabling agents that can engage
+-- in multi-turn dialogue while maintaining internal state.
