@@ -28,10 +28,10 @@
 -- >>> :set -XOverloadedStrings
 --
 -- >>> frameMessage "hermes" "status check"
--- \"[hermes] status check\"
+-- "[hermes] status check"
 --
--- >>> parseMessage \"[llm] found a type error in Foo.hs\"
--- Just (\"llm\", \"found a type error in Foo.hs\")
+-- >>> parseMessage "[llm] found a type error in Foo.hs"
+-- Just ("llm","found a type error in Foo.hs")
 --
 -- === Usage
 --
@@ -252,7 +252,7 @@ frameMessage sender body = "[" <> sender <> "] " <> body
 -- | Parse a framed message into @(sender, body)@.
 --
 -- >>> parseMessage "[llm] found a type error"
--- Just ("llm", "found a type error")
+-- Just ("llm","found a type error")
 --
 -- >>> parseMessage "unframed text"
 -- Nothing
