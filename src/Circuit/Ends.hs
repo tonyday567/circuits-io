@@ -50,10 +50,15 @@ module Circuit.Ends
 
     -- * Unit
     open,
+
+    -- * Runtime unit
+    openSTM,
   )
 where
 
-import Circuit (Co (..), Contra (..), Trace (..), close)
+import Circuit (Co (..), Contra (..), Trace (..), close, run)
+import Control.Arrow (Kleisli (..))
+import Control.Concurrent.STM
 import Prelude hiding (id, (.))
 
 -- | @η@ — the unit of the companion/conjoint adjunction (pure case).
@@ -72,3 +77,24 @@ open seed = (co, contra)
   where
     co = Co $ \_ -> Arr (const seed)
     contra = Contra $ \c -> runContra c contra
+
+-- | Runtime unit for an STM 'TVar' cell.
+--
+-- The companion reads the cell; the conjoint writes its input and then reads
+-- the cell back through the companion.  This gives 'close' a duplex
+-- (write-then-read) meaning over a shared mutable cell.
+--
+-- >>> import Circuit (run)
+-- >>> import Control.Arrow (Kleisli (..), runKleisli)
+-- >>> import Control.Concurrent.STM
+-- >>> t <- newTVarIO "before"
+-- >>> (co, contra) <- openSTM t
+-- >>> runKleisli (run (close contra co)) "after"
+-- "after"
+openSTM :: TVar a -> IO (Co (Kleisli IO) (,) a, Contra (Kleisli IO) (,) a)
+openSTM tvar = pure (co, contra)
+  where
+    co = Co $ \_ -> Arr (Kleisli $ \_ -> atomically (readTVar tvar))
+    contra = Contra $ \co' -> Arr (Kleisli $ \a -> do
+      atomically (writeTVar tvar a)
+      runKleisli (run (runContra co' contra)) a)
