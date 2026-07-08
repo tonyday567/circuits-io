@@ -24,6 +24,9 @@
 --
 -- One message per line: @[sender] body@
 --
+-- $setup
+-- >>> :set -XOverloadedStrings
+--
 -- >>> frameMessage "hermes" "status check"
 -- \"[hermes] status check\"
 --

@@ -63,12 +63,12 @@ import Prelude hiding (id, (.))
 -- the conjoint calls the companion back, which returns the seed —
 -- the mutual recursion bottoms out because the companion returns first.
 --
--- >>> import Circuit (realise)
+-- >>> import Circuit (run)
 -- >>> let (co, contra) = open (42 :: Int)
--- >>> realise (close contra co) 99
+-- >>> run (close contra co) 99
 -- 42
 open :: a -> (Co (->) (,) a, Contra (->) (,) a)
 open seed = (co, contra)
   where
-    co = Co $ \_ -> Lift (const seed)
+    co = Co $ \_ -> Arr (const seed)
     contra = Contra $ \c -> runContra c contra

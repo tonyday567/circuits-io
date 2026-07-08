@@ -32,15 +32,16 @@ module Circuit.Queue
   )
 where
 
-import Circuit (Trace (..))
+import Circuit (Trace (..), Traced)
 import Control.Applicative
 import Control.Arrow (Kleisli (..))
+import Control.Category ((>>>))
 import Control.Concurrent.STM
 import Prelude
 
 -- $setup
 -- >>> :set -XOverloadedStrings
--- >>> import Circuit (Trace(..), realise)
+-- >>> import Circuit (Trace(..), run)
 -- >>> import Circuit.Queue
 -- >>> import Control.Arrow (Kleisli(..), runKleisli)
 -- >>> import Control.Category ((>>>))
@@ -163,10 +164,10 @@ endsPure = \case
 -- Bare FIFO via 'endsPure' (note: 'flip' to match state-first order):
 --
 -- >>> let qpush = push (flip (fst (endsPure Unbounded)))
--- >>> realise (qpush :: Trace (,) (->) ([Int], Int) ([Int], Bool)) ([], 1)
+-- >>> run (qpush :: Trace (,) (->) ([Int], Int) ([Int], Bool)) ([], 1)
 -- ([1],True)
 push :: (s -> a -> (s, Bool)) -> Trace t (->) (s, a) (s, Bool)
-push f = Lift (uncurry f)
+push f = Arr (uncurry f)
 
 -- | Pop from state, returning 'Maybe' a.
 -- 'Nothing' signals empty.
@@ -174,12 +175,12 @@ push f = Lift (uncurry f)
 -- Bare FIFO via 'endsPure':
 --
 -- >>> let qpop = pop (snd (endsPure Unbounded))
--- >>> realise (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([1,2,3], ())
+-- >>> run (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([1,2,3], ())
 -- ([2,3],Just 1)
--- >>> realise (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([], ())
+-- >>> run (qpop :: Trace (,) (->) ([Int], ()) ([Int], Maybe Int)) ([], ())
 -- ([],Nothing)
 pop :: (s -> (s, Maybe a)) -> Trace t (->) (s, ()) (s, Maybe a)
-pop f = Lift (\(s, ()) -> f s)
+pop f = Arr (\(s, ()) -> f s)
 
 -- ---------------------------------------------------------------------------
 -- STM queue ends
@@ -191,20 +192,21 @@ pop f = Lift (\(s, ()) -> f s)
 --
 -- >>> (pushA, popA) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
 -- >>> (pushB, popB) <- atomically (endsQueue Unbounded :: STM (WireK IO Int (), WireK IO () Int))
--- >>> let pipe = Lift (Kleisli $ \() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
--- >>> runKleisli (realise pipe) ()
+-- >>> let pipe = Arr (Kleisli $ \() -> pure (7 :: Int)) >>> pushA >>> popA >>> pushB >>> popB
+-- >>> runKleisli (run pipe) ()
 -- 7
 endsQueue :: Queue a -> STM (Trace t (Kleisli IO) a (), Trace t (Kleisli IO) () a)
 endsQueue q = do
   (write, read') <- endsSTM q
-  pure (Lift (Kleisli (atomically . write)), Lift (Kleisli (\() -> atomically read')))
+  pure (Arr (Kleisli (atomically . write)), Arr (Kleisli (\() -> atomically read')))
 
 -- | Plug a push end and a pop end together into a single circuit.
 --
 -- This is the extrinsic analogue of 'Circuit.Ends.close': two ends
 -- that share an STM channel are composed into @Circuit a a@.
 closeQueue ::
+  (Traced t (Kleisli IO)) =>
   Trace t (Kleisli IO) a () ->
   Trace t (Kleisli IO) () a ->
   Trace t (Kleisli IO) a a
-closeQueue push' pop' = Compose pop' push'
+closeQueue push' pop' = push' >>> pop'

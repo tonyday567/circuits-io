@@ -258,15 +258,15 @@ readLines fp = do
 --
 -- Composes with other 'Circuit (Kleisli IO)' fragments via '(>>>)'.
 replRead :: Repl -> Trace t (Kleisli IO) () [Text]
-replRead r = Lift $ Kleisli $ \() -> replEmit r
+replRead r = Arr $ Kleisli $ \() -> replEmit r
 
 -- | Write one line to the REPL as a 'Trace'.
 replWrite :: Repl -> Trace t (Kleisli IO) Text ()
-replWrite r = Lift $ Kleisli $ replCommit r
+replWrite r = Arr $ Kleisli $ replCommit r
 
 -- | Write multiple lines to the REPL as a 'Trace'.
 replWriteLines :: Repl -> Trace t (Kleisli IO) [Text] ()
-replWriteLines r = Lift $ Kleisli $ mapM_ (replCommit r)
+replWriteLines r = Arr $ Kleisli $ mapM_ (replCommit r)
 
 -- ---------------------------------------------------------------------------
 -- Sync — poll with backoff until prompt
