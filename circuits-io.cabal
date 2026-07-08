@@ -9,11 +9,13 @@ author: Tony Day
 maintainer: tonyday567@gmail.com
 homepage: https://github.com/tonyday567/circuits#readme
 bug-reports: https://github.com/tonyday567/circuits/issues
-synopsis: Channel decomposition and buffered IO for the circuits library
+synopsis: Agent and external-process IO for the circuits library
 description:
-  @circuits-io@ provides channel decomposition and buffered IO for the circuits library.
-  Three entry points: circuit feedback ('Circuit.Ends'), queue buffering ('Circuit.Queue'),
-  and external process communication ('Circuit.Repl', 'Circuit.Socket').
+  @circuits-io@ provides agent and external-process IO for the circuits library.
+  Entry points: REPL/process driving ('Circuit.Repl'), multi-agent channels
+  ('Circuit.Comm', 'Circuit.Session'), sockets ('Circuit.Socket'), and timing
+  ('Circuit.Time'). Channel ends and queue buffering now live in the core
+  @circuits@ package.
 
 build-type: Simple
 tested-with:
@@ -48,8 +50,6 @@ library
   hs-source-dirs: src
   exposed-modules:
     Circuit.Comm
-    Circuit.Ends
-    Circuit.Queue
     Circuit.Repl
     Circuit.Session
     Circuit.Socket
