@@ -370,7 +370,7 @@ startCabalRepl dir = do
 
 -- | Hermes prompt: the leading @❯@ character.
 hermesPrompt :: Text -> Bool
-hermesPrompt t = "❯" `T.isPrefixOf` (T.stripStart t)
+hermesPrompt t = "❯" `T.isPrefixOf` T.stripStart t
 
 -- | Send a prompt to a Hermes agent and return the clean response.
 --
@@ -379,7 +379,7 @@ hermesPrompt t = "❯" `T.isPrefixOf` (T.stripStart t)
 hermesCommand :: Repl -> Text -> IO [Text]
 hermesCommand r cmd = do
   replCommit r cmd
-  mLines <- replSyncWith hermesPrompt 120000000 r  -- 2 minute timeout
+  mLines <- replSyncWith hermesPrompt 120000000 r -- 2 minute timeout
   pure $ case mLines of
     Nothing -> []
     Just ls -> filter (not . isHermesGuff) (takeWhile (not . hermesPrompt) ls)
@@ -396,7 +396,7 @@ isHermesGuff t =
       "Available Skills" `T.isInfixOf` t,
       "Session:" `T.isPrefixOf` t,
       "Resume this session" `T.isPrefixOf` t,
-      "⚕" `T.isPrefixOf` (T.stripStart t),
+      "⚕" `T.isPrefixOf` T.stripStart t,
       "✦ Tip:" `T.isPrefixOf` t,
       T.all isSpace t,
       T.null t
@@ -420,7 +420,7 @@ startAgent workDir = do
           }
   r <- replOpen cfg
   -- Consume startup guff: banner, tool list, welcome message, first prompt.
-  _ <- replSyncWith hermesPrompt 60000000 r  -- 60 second timeout
+  _ <- replSyncWith hermesPrompt 60000000 r -- 60 second timeout
   pure r
 
 -- TODO (open thread for Circuit.Agent integration):

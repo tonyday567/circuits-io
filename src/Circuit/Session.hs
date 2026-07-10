@@ -106,14 +106,14 @@ defaultSessionConfig name =
 data Session = Session
   { sessChan :: Channel,
     sessCfg :: SessionConfig,
+    -- | Message buffer shared across sessions on this channel
     sessBuffer :: MVar [Msg],
-    -- ^ Message buffer shared across sessions on this channel
+    -- | Pending questions: msgId → response MVar (shared across sessions)
     sessPending :: IORef (Map.Map Text (MVar Text)),
-    -- ^ Pending questions: msgId → response MVar (shared across sessions)
+    -- | Monotonically increasing message ID counter (per-session)
     sessCounter :: IORef Int,
-    -- ^ Monotonically increasing message ID counter (per-session)
+    -- | True if this session owns the dispatcher
     sessOwnsBus :: Bool
-    -- ^ True if this session owns the dispatcher
   }
 
 -- | Open a new session — creates the channel, shared buffer, and dispatcher.
@@ -182,7 +182,7 @@ dispatcher s = forever $ do
               Nothing -> pure ()
           _ -> pure ()
       Nothing -> pure ()
-  threadDelay 100_000  -- 100ms poll interval
+  threadDelay 100_000 -- 100ms poll interval
 
 -- | Simple forever helper.
 forever :: IO () -> IO ()
@@ -194,12 +194,12 @@ forever a = a >> forever a
 
 -- | A parsed message with protocol semantics.
 data Msg
-  = Broadcast Text Text
-  -- ^ @sender body@ — plain broadcast
-  | Question Text Text Text
-  -- ^ @sender msgId body@ — question expecting an answer
-  | Answer Text Text Text
-  -- ^ @sender msgId body@ — answer to a question
+  = -- | @sender body@ — plain broadcast
+    Broadcast Text Text
+  | -- | @sender msgId body@ — question expecting an answer
+    Question Text Text Text
+  | -- | @sender msgId body@ — answer to a question
+    Answer Text Text Text
   deriving (Show, Eq)
 
 -- | Receive all new messages since the last poll (non-blocking).
@@ -241,7 +241,7 @@ parseMsg sender body =
 
 -- | Send a broadcast message (no reply expected).
 tell :: Session -> Text -> IO ()
-tell s body = channelSend (sessChan s) body
+tell s = channelSend (sessChan s)
 
 -- | Send a raw text through the underlying channel (bypasses framing).
 --

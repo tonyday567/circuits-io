@@ -17,7 +17,7 @@ module Main where
 import Circuit.Comm
 import Circuit.Repl
 import Control.Concurrent (threadDelay)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Foldable (forM_)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -48,16 +48,19 @@ loop agent ch cursor = do
     when (sender /= "agent") $ do
       hPutStrLn stderr $ "  ← [" <> T.unpack sender <> "] " <> T.unpack (T.take 80 body)
       -- Feed the message to Hermes.
-      let prompt = "You are an AI agent named 'agent' on a shared channel. "
-                <> "A user named '" <> sender <> "' sent: " <> body <> " "
-                <> "Respond helpfully as [agent]. Keep it brief."
+      let prompt =
+            "You are an AI agent named 'agent' on a shared channel. "
+              <> "A user named '"
+              <> sender
+              <> "' sent: "
+              <> body
+              <> " "
+              <> "Respond helpfully as [agent]. Keep it brief."
       resp <- hermesCommand agent prompt
-      if not (null resp)
-        then do
-          let clean = T.unlines resp
-          channelSend ch ("[agent] " <> clean)
-          hPutStrLn stderr $ "  → [agent] " <> T.unpack (T.take 80 clean)
-        else pure ()
+      unless (null resp) $ do
+        let clean = T.unlines resp
+        channelSend ch ("[agent] " <> clean)
+        hPutStrLn stderr $ "  → [agent] " <> T.unpack (T.take 80 clean)
 
-  threadDelay 2_000_000  -- poll every 2 seconds
+  threadDelay 2_000_000 -- poll every 2 seconds
   loop agent ch cursor

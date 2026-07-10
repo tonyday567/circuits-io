@@ -1,31 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Multi-agent communication channel built on 'Circuit.Repl' primitives.
---
--- === Architecture
---
--- A channel is a shared FIFO + append-only log.  The \"bus\" is
--- literally @cat@ — it reads the FIFO and writes to the log.
--- Any number of agents can attach via 'channelAttach'; each
--- maintains its own read cursor so it only sees new messages.
---
--- The write-end of the FIFO is kept open for the lifetime of each
--- handle.  This prevents the bus from seeing EOF and exiting
--- between messages.  Multiple writers are serialized by the OS.
---
--- @
---   Agent A ──write──→ FIFO ──read──→ cat ──write──→ stdout log
---   Agent B ──write──→ FIFO                ↑ read ↙  (shared file)
---   Agent C ──write──→ FIFO           Agent B ──read──→ cursor B
---                                     Agent A ──read──→ cursor A
--- @
---
--- === Message format
---
--- One message per line: @[sender] body@
---
+{- ORMOLU_DISABLE -}
 -- $setup
 -- >>> :set -XOverloadedStrings
+{- ORMOLU_ENABLE -}
 --
 -- >>> frameMessage "hermes" "status check"
 -- "[hermes] status check"
@@ -55,6 +33,30 @@
 --       answer <- think body
 --       channelSend ch (sender <> \": \" <> answer)
 -- @
+
+-- | Multi-agent communication channel built on 'Circuit.Repl' primitives.
+--
+-- === Architecture
+--
+-- A channel is a shared FIFO + append-only log.  The \"bus\" is
+-- literally @cat@ — it reads the FIFO and writes to the log.
+-- Any number of agents can attach via 'channelAttach'; each
+-- maintains its own read cursor so it only sees new messages.
+--
+-- The write-end of the FIFO is kept open for the lifetime of each
+-- handle.  This prevents the bus from seeing EOF and exiting
+-- between messages.  Multiple writers are serialized by the OS.
+--
+-- @
+--   Agent A ──write──→ FIFO ──read──→ cat ──write──→ stdout log
+--   Agent B ──write──→ FIFO                ↑ read ↙  (shared file)
+--   Agent C ──write──→ FIFO           Agent B ──read──→ cursor B
+--                                     Agent A ──read──→ cursor A
+-- @
+--
+-- === Message format
+--
+-- One message per line: @[sender] body@
 module Circuit.Comm
   ( -- * Configuration
     ChannelConfig (..),
@@ -93,16 +95,16 @@ import Prelude
 
 -- | Channel configuration.
 data ChannelConfig = ChannelConfig
-  { chStdinPath :: FilePath
-  -- ^ Shared stdin FIFO — agents write messages here.
-  , chStdoutPath :: FilePath
-  -- ^ Shared stdout log — the bus appends here, agents read from here.
-  , chStderrPath :: FilePath
-  -- ^ Bus process stderr.
-  , chName :: Text
-  -- ^ This agent's name (used as @[name]@ prefix on sent messages).
-  , chWorkingDir :: FilePath
-  -- ^ Working directory for the bus process.
+  { -- | Shared stdin FIFO — agents write messages here.
+    chStdinPath :: FilePath,
+    -- | Shared stdout log — the bus appends here, agents read from here.
+    chStdoutPath :: FilePath,
+    -- | Bus process stderr.
+    chStderrPath :: FilePath,
+    -- | This agent's name (used as @[name]@ prefix on sent messages).
+    chName :: Text,
+    -- | Working directory for the bus process.
+    chWorkingDir :: FilePath
   }
   deriving (Show, Eq)
 
@@ -162,8 +164,9 @@ channelOpen cfg = do
   repl <- replOpen (toReplConfig cfg)
   -- Open a persistent write-end so the bus never sees EOF.
   -- If openFile fails, clean up the spawned Repl process.
-  writeH <- openFile (chStdinPath cfg) WriteMode
-    `onException` replClose repl
+  writeH <-
+    openFile (chStdinPath cfg) WriteMode
+      `onException` replClose repl
   hSetBuffering writeH NoBuffering
   pure $ Channel repl cfg writeH
 
@@ -264,9 +267,9 @@ parseMessage t =
       case T.breakOn "] " rest of
         (sender, body)
           | T.null sender -> Nothing
-          | T.null body -> Nothing         -- no "] " found
+          | T.null body -> Nothing -- no "] " found
           | otherwise ->
-              let body' = T.drop 2 body    -- drop "] "
+              let body' = T.drop 2 body -- drop "] "
                in if T.null body'
                     then Nothing
                     else Just (sender, body')

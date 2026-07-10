@@ -8,6 +8,7 @@ import Circuit.Session
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (forM_, when)
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import System.Directory (doesFileExist, removeFile)
@@ -150,17 +151,19 @@ channelTests =
     [ testCase "framing roundtrip" $ do
         let name = "test-agent"
         let body = "hello world"
-        assertEqual "roundtrip"
+        assertEqual
+          "roundtrip"
           (Just (name, body))
           (parseMessage (frameMessage name body)),
       testCase "parseMessage rejects unframed text" $ do
-        assertBool "unframed" (parseMessage "hello world" == Nothing),
+        assertBool "unframed" (isNothing (parseMessage "hello world")),
       testCase "parseMessage rejects empty sender" $ do
-        assertBool "empty sender" (parseMessage "[] body" == Nothing),
+        assertBool "empty sender" (isNothing (parseMessage "[] body")),
       testCase "parseMessage rejects empty body after bracket" $ do
-        assertBool "empty body" (parseMessage "[agent] " == Nothing),
+        assertBool "empty body" (isNothing (parseMessage "[agent] ")),
       testCase "parseMessage handles bracket in body" $ do
-        assertEqual "bracket in body"
+        assertEqual
+          "bracket in body"
           (Just ("agent", "[nested] text"))
           (parseMessage "[agent] [nested] text"),
       testCase "single-agent send and recv with cat bus" $ do
@@ -243,7 +246,7 @@ channelTests =
         channelClose ch
         threadDelay 100_000
 
-        assertBool "should time out with Nothing" (mMsgs == Nothing),
+        assertBool "should time out with Nothing" (isNothing mMsgs),
       testCase "blocking recv returns messages when they arrive" $ do
         let cfg = mkChCfg "agent-sender" "ch-test-5"
         cleanChLogs cfg
@@ -291,21 +294,24 @@ sessionTests =
   testGroup
     "Session (ask/answer protocol)"
     [ testCase "parseMsg broadcast" $ do
-        assertEqual "broadcast"
+        assertEqual
+          "broadcast"
           (Just (Broadcast "sender" "hello world"))
           (parseMsg "sender" "hello world"),
       testCase "parseMsg question" $ do
-        assertEqual "question"
+        assertEqual
+          "question"
           (Just (Question "agent" "agent.0" "should I refactor?"))
           (parseMsg "agent" "? agent.0 should I refactor?"),
       testCase "parseMsg answer" $ do
-        assertEqual "answer"
+        assertEqual
+          "answer"
           (Just (Answer "agent" "agent.0" "yes go ahead"))
           (parseMsg "agent" "! agent.0 yes go ahead"),
       testCase "parseMsg rejects malformed question (no id)" $ do
-        assertBool "no id" (parseMsg "agent" "? " == Nothing),
+        assertBool "no id" (isNothing (parseMsg "agent" "? ")),
       testCase "parseMsg rejects malformed question (no body)" $ do
-        assertBool "no body" (parseMsg "agent" "? x " == Nothing),
+        assertBool "no body" (isNothing (parseMsg "agent" "? x ")),
       testCase "tell and recv" $ do
         let cfgA = mkSessCfg "agent-a" "sess-bcast"
         cleanSessLogs cfgA
@@ -420,11 +426,11 @@ sessionTests =
       whenM (doesFileExist (chStdinPath ch)) (removeFile (chStdinPath ch))
 
     isQuestion :: Msg -> Bool
-    isQuestion (Question _ _ _) = True
+    isQuestion Question {} = True
     isQuestion _ = False
 
     isAnswer :: Msg -> Bool
-    isAnswer (Answer _ _ _) = True
+    isAnswer Answer {} = True
     isAnswer _ = False
 
     findQuestion :: [Msg] -> Maybe Msg
