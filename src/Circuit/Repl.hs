@@ -280,7 +280,7 @@ replRelease :: Repl -> String -> IO ()
 replRelease r name = do
   let path = replTokenPath (replConfig r)
   exists <- doesFileExist path
-  when exists do
+  when exists $ do
     holder <- filter (not . isSpace) <$> readFile path
     when (holder == name) $ removeFile path
 

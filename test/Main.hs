@@ -40,7 +40,8 @@ replTests =
               (baseCfg ["--prompt=mock> ", "--delay=20", "--no-extra-noise"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-1",
                   replStdoutPath = "/tmp/circuits-io-mock-out-1.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-1.md"
+                  replStderrPath = "/tmp/circuits-io-mock-err-1.md",
+                  replTokenPath = "/tmp/circuits-io-mock-out-1.md.token"
                 }
 
         cleanLogs cfg
@@ -70,7 +71,8 @@ replTests =
               (baseCfg ["--prompt=mock> ", "--delay=15"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-2",
                   replStdoutPath = "/tmp/circuits-io-mock-out-2.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-2.md"
+                  replStderrPath = "/tmp/circuits-io-mock-err-2.md",
+                  replTokenPath = "/tmp/circuits-io-mock-out-2.md.token"
                 }
 
         cleanLogs cfg
@@ -102,7 +104,8 @@ replTests =
               (baseCfg ["--prompt=mock-hang> ", "--delay=10", "--hanging-prompt", "--no-extra-noise"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-3",
                   replStdoutPath = "/tmp/circuits-io-mock-out-3.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-3.md"
+                  replStderrPath = "/tmp/circuits-io-mock-err-3.md",
+                  replTokenPath = "/tmp/circuits-io-mock-out-3.md.token"
                 }
 
         cleanLogs cfg
@@ -121,7 +124,42 @@ replTests =
           Nothing -> assertFailure "timeout on hanging prompt test"
           Just lines -> do
             let combined = T.unlines lines
-            assertBool "response captured even with hanging prompt" ("echo: hello" `T.isInfixOf` combined)
+            assertBool "response captured even with hanging prompt" ("echo: hello" `T.isInfixOf` combined),
+      testCase "write token: second claim rejected until release" $ do
+        let cfg =
+              (baseCfg ["--prompt=mock> ", "--delay=10", "--no-extra-noise"])
+                { replStdinPath = "/tmp/circuits-io-mock-in-claim",
+                  replStdoutPath = "/tmp/circuits-io-mock-out-claim.md",
+                  replStderrPath = "/tmp/circuits-io-mock-err-claim.md",
+                  replTokenPath = "/tmp/circuits-io-mock-out-claim.md.token"
+                }
+        cleanLogs cfg
+        owner <- replOpen cfg
+        threadDelay 400_000
+        _ <- replSyncWith (T.isSuffixOf "mock> ") 5_000_000 owner
+        attacher <-
+          replAttach
+            cfg
+              { replStdinPath = replStdinPath cfg -- same session paths
+              }
+
+        okA <- replClaim owner "alice"
+        assertBool "alice claims" okA
+        okB <- replClaim attacher "bob"
+        assertBool "bob rejected while alice holds" (not okB)
+
+        m <- replEval owner "alice" "hello"
+        case m of
+          Nothing -> assertFailure "alice eval failed"
+          Just ls -> assertBool "eval echo" ("echo: hello" `T.isInfixOf` T.unlines ls)
+
+        -- after eval, token released
+        okB2 <- replClaim attacher "bob"
+        assertBool "bob claims after alice eval" okB2
+        replRelease attacher "bob"
+
+        replClose owner
+        threadDelay 100_000
     ]
   where
     baseCfg args =
@@ -131,7 +169,8 @@ replTests =
           replStdinPath = "/tmp/circuits-io-mock-in",
           replStdoutPath = "/tmp/circuits-io-mock-out.md",
           replStderrPath = "/tmp/circuits-io-mock-err.md",
-          replWorkingDir = "."
+          replWorkingDir = ".",
+          replTokenPath = "/tmp/circuits-io-mock-out.md.token"
         }
 
     cleanLogs cfg =
@@ -140,7 +179,8 @@ replTests =
         [ replStdinPath cfg,
           replStdoutPath cfg,
           replStderrPath cfg,
-          replStdoutPath cfg <> ".cursor"
+          replStdoutPath cfg <> ".cursor",
+          replTokenPath cfg
         ]
 
 -- ---------------------------------------------------------------------------
