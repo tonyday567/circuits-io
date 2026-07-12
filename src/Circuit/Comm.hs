@@ -137,7 +137,8 @@ toReplConfig cfg =
       replStdinPath = chStdinPath cfg,
       replStdoutPath = chStdoutPath cfg,
       replStderrPath = chStderrPath cfg,
-      replWorkingDir = chWorkingDir cfg
+      replWorkingDir = chWorkingDir cfg,
+      replTokenPath = chStdoutPath cfg <> ".token"
     }
 
 -- ---------------------------------------------------------------------------

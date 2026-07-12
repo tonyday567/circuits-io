@@ -39,6 +39,7 @@ module Circuit.Repl
 
     -- * Repl handle
     Repl,
+    replGetConfig,
     replOpen,
     replClose,
     replAttach,
@@ -51,6 +52,10 @@ module Circuit.Repl
     replClaim,
     replRelease,
     replEval,
+
+    -- * Cabal-repl session helpers
+    cabalReplConfig,
+    withCabalRepl,
 
     -- * Circuit views
     replRead,
@@ -81,16 +86,20 @@ where
 import Circuit (Trace (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
 import Control.Monad (unless, when)
 import Cursor qualified as Cur
 import Data.Char (isSpace)
 import Data.Foldable (for_)
+import Data.IORef
 import Data.List (find)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import System.Directory (doesFileExist, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.Environment (getEnv)
+import System.FilePath ((</>))
 import System.IO
 import System.Posix.Process (getProcessID)
 import System.Process
@@ -145,8 +154,16 @@ defaultReplConfig =
 data Repl = Repl
   { replConfig :: ReplConfig,
     replProcessHandle :: Maybe ProcessHandle,
-    replCursor :: Cur.Cursor
+    replCursor :: Cur.Cursor,
+    -- | Last trailing partial line we already surfaced (hanging prompt).
+    --   Used so idle polls do not re-emit the same @ghci> @ forever, while
+    --   still re-surfacing it after complete output (answer + new prompt).
+    replLastPartial :: IORef (Maybe Text)
   }
+
+-- | Config used to open / attach this handle.
+replGetConfig :: Repl -> ReplConfig
+replGetConfig = replConfig
 
 -- | Cursor file beside the stdout log.  Owner uses @.cursor@; attach uses
 -- @.cursor-attach-<pid>@ so concurrent readers do not share position.
@@ -202,7 +219,8 @@ replOpen cfg = do
 
   cursor <- Cur.newFile (ownerCursorPath cfg)
   Cur.set cursor 0
-  pure $ Repl cfg (Just ph) cursor
+  lastP <- newIORef Nothing
+  pure $ Repl cfg (Just ph) cursor lastP
 
 -- | Attach to an already-running REPL (e.g. one started by another agent or
 -- manually with the same FIFO paths). Does not spawn or manage the process
@@ -219,11 +237,13 @@ replAttach :: ReplConfig -> IO Repl
 replAttach cfg = do
   -- Do not create FIFO or spawn; assume caller has set up the process
   -- reading the FIFO and logging output.
-  ls <- readLines (replStdoutPath cfg)
+  content <- readLogContent (replStdoutPath cfg)
+  let (complete, _) = splitComplete content
   path <- attachCursorPath cfg
   cursor <- Cur.newFile path
-  Cur.seekEnd cursor ls
-  pure $ Repl cfg Nothing cursor
+  Cur.seekEnd cursor complete
+  lastP <- newIORef Nothing
+  pure $ Repl cfg Nothing cursor lastP
 
 -- | Close a REPL session.
 --
@@ -250,12 +270,25 @@ replCommit r t =
 
 -- | Receive all new lines from the REPL's stdout.
 --
--- Reads the entire stdout file, returns lines after the cursor position
--- (via 'Cur.pollLines'), and advances the cursor.
+-- Advances the cursor only over /complete/ (newline-terminated) lines, and
+-- always surfaces a trailing partial line (GHCi's hanging @ghci> @).  This
+-- avoids the partial-line trap: if a partial prompt is counted as a full
+-- line, GHCi appending a type answer onto it makes @drop@ skip the answer.
 replEmit :: Repl -> IO [Text]
 replEmit r = do
-  ls <- readLines (replStdoutPath (replConfig r))
-  Cur.pollLines (replCursor r) ls
+  content <- readLogContent (replStdoutPath (replConfig r))
+  let (complete, mPartial) = splitComplete content
+  news <- Cur.pollLines (replCursor r) complete
+  prev <- readIORef (replLastPartial r)
+  writeIORef (replLastPartial r) mPartial
+  let partialNews = case (news, prev, mPartial) of
+        (_, _, Nothing) -> []
+        -- After complete lines arrive, re-surface current partial (new prompt).
+        (_ : _, _, Just p) -> [p]
+        -- Idle: only emit partial if it is new or changed.
+        ([], Just old, Just p) | old == p -> []
+        ([], _, Just p) -> [p]
+  pure (news <> partialNews)
 
 -- ---------------------------------------------------------------------------
 -- Write claim — exclusive multi-agent eval
@@ -298,27 +331,92 @@ replEval r name cmd = do
       -- Drain pending so the response window starts clean.
       _ <- replEmit r
       replCommit r cmd
+      -- Settle + drain: type answers can land fused onto a hanging prompt.
+      threadDelay 100_000
       m <- replSync r
+      threadDelay 100_000
+      extra <- replEmit r
       replRelease r name
-      pure m
+      pure $ case m of
+        Nothing -> Nothing
+        Just ls ->
+          Just $
+            map stripGhciPrefix $
+              filter (\t -> not (T.null (T.strip t))) (ls <> extra)
 
--- | Read all lines from a file, including a possible partial last line
--- (common when REPLs print a prompt with putStr and no trailing newline).
--- This is important for prompt detection on the hanging prompt line.
-readLines :: FilePath -> IO [Text]
-readLines fp = do
-  content <- TIO.readFile fp
-  -- Truly empty file → no lines (important for replAttach cursor correctness).
-  if T.null content
-    then pure []
-    else do
+-- ---------------------------------------------------------------------------
+-- Cabal-repl session helpers (direct process, no cat-bus)
+-- ---------------------------------------------------------------------------
+
+-- | Build a 'ReplConfig' for @cabal repl@ in @projectDir@, with session
+-- state under @$HOME/mg/logs/process-harness/<session>/@.
+--
+-- Paths:
+--
+--   * @stdin.fifo@ — FIFO
+--   * @stdout.md@ / @stderr.md@ — append-only logs
+--   * @write.token@ — multi-agent claim file
+--
+-- Creates the session directory if missing.
+cabalReplConfig :: FilePath -> String -> IO ReplConfig
+cabalReplConfig projectDir session = do
+  home <- getEnv "HOME"
+  let dir = home </> "mg" </> "logs" </> "process-harness" </> session
+  createDirectoryIfMissing True dir
+  pure
+    defaultReplConfig
+      { replCommand = "cabal",
+        replArgs = ["repl"],
+        replWorkingDir = projectDir,
+        replStdinPath = dir </> "stdin.fifo",
+        replStdoutPath = dir </> "stdout.md",
+        replStderrPath = dir </> "stderr.md",
+        replTokenPath = dir </> "write.token"
+      }
+
+-- | Open a cabal repl, wait for the initial prompt (discarding startup guff),
+-- run the action, then 'replClose'.  Long initial sync timeout (3 min) so
+-- cold builds of the target package can finish.
+withCabalRepl :: FilePath -> String -> (Repl -> IO a) -> IO a
+withCabalRepl projectDir session action = do
+  cfg <- cabalReplConfig projectDir session
+  bracket (replOpen cfg) replClose $ \r -> do
+    -- Cold cabal repl can take a while (configure + load).
+    m <- replSyncWith defaultPrompt 180_000_000 r
+    case m of
+      Nothing ->
+        fail $
+          "withCabalRepl: timed out waiting for initial prompt in "
+            <> projectDir
+            <> " (session "
+            <> session
+            <> ")"
+      Just _ -> action r
+
+-- | Read raw log content (empty if missing).
+readLogContent :: FilePath -> IO Text
+readLogContent fp = do
+  exists <- doesFileExist fp
+  if not exists
+    then pure ""
+    else TIO.readFile fp
+
+-- | Split into complete (newline-terminated) lines and optional trailing partial.
+splitComplete :: Text -> ([Text], Maybe Text)
+splitComplete content
+  | T.null content = ([], Nothing)
+  | T.isSuffixOf "\n" content = (T.lines content, Nothing)
+  | otherwise =
       let parts = T.splitOn "\n" content
-      -- If the file ends with \n, the last part is empty; drop trailing empties.
-      -- But keep a non-empty last part without \n (the partial/prompt line).
-      pure $
-        if T.isSuffixOf "\n" content
-          then filter (not . T.null) parts
-          else parts
+       in case parts of
+            [] -> ([], Nothing)
+            _ -> (init parts, Just (last parts))
+
+-- | Strip a leading @ghci> @ decoration fused onto an answer line.
+stripGhciPrefix :: Text -> Text
+stripGhciPrefix t
+  | "ghci> " `T.isPrefixOf` t = T.drop 6 t
+  | otherwise = t
 
 -- ---------------------------------------------------------------------------
 -- Circuit views
