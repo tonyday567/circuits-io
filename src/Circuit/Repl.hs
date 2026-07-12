@@ -29,6 +29,9 @@
 --
 -- No callbacks, no listeners, no async machinery.  Just IO.
 -- Line-oriented text.  Cursor-based emission (no duplicate reads).
+--
+-- Read position uses the standalone @cursor@ package ('Cursor.newFile') so
+-- attach points survive process restart and share the same type as muster.
 module Circuit.Repl
   ( -- * Configuration
     ReplConfig (..),
@@ -43,6 +46,11 @@ module Circuit.Repl
     -- * Primitives
     replCommit,
     replEmit,
+
+    -- * Write claim (multi-agent exclusive eval)
+    replClaim,
+    replRelease,
+    replEval,
 
     -- * Circuit views
     replRead,
@@ -73,17 +81,18 @@ where
 import Circuit (Trace (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
+import Cursor qualified as Cur
 import Data.Char (isSpace)
 import Data.Foldable (for_)
-import Data.IORef
 import Data.List (find)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, removeFile)
 import System.IO
+import System.Posix.Process (getProcessID)
 import System.Process
 import Prelude
 
@@ -104,7 +113,10 @@ data ReplConfig = ReplConfig
     -- | Path to stderr log file
     replStderrPath :: FilePath,
     -- | Working directory
-    replWorkingDir :: FilePath
+    replWorkingDir :: FilePath,
+    -- | Write-token path for multi-agent exclusive claim.
+    --   Default: @replStdoutPath <> \".token\"@.
+    replTokenPath :: FilePath
   }
   deriving (Show, Eq)
 
@@ -117,7 +129,8 @@ defaultReplConfig =
       replStdinPath = "/tmp/repl-stdin",
       replStdoutPath = "/tmp/repl-stdout.md",
       replStderrPath = "/tmp/repl-stderr.md",
-      replWorkingDir = "."
+      replWorkingDir = ".",
+      replTokenPath = "/tmp/repl-stdout.md.token"
     }
 
 -- ---------------------------------------------------------------------------
@@ -126,13 +139,24 @@ defaultReplConfig =
 
 -- | A live REPL session.
 --
--- Internally tracks a line cursor so 'replEmit' only returns output
--- that has arrived since the last call.
+-- Internally tracks a line cursor ('Cur.Cursor', file-backed) so 'replEmit'
+-- only returns output that has arrived since the last call.  File backing
+-- means attach cursors survive restarts and match muster/process-harness.
 data Repl = Repl
   { replConfig :: ReplConfig,
     replProcessHandle :: Maybe ProcessHandle,
-    replCursor :: IORef Int
+    replCursor :: Cur.Cursor
   }
+
+-- | Cursor file beside the stdout log.  Owner uses @.cursor@; attach uses
+-- @.cursor-attach-<pid>@ so concurrent readers do not share position.
+ownerCursorPath :: ReplConfig -> FilePath
+ownerCursorPath cfg = replStdoutPath cfg <> ".cursor"
+
+attachCursorPath :: ReplConfig -> IO FilePath
+attachCursorPath cfg = do
+  pid <- getProcessID
+  pure (replStdoutPath cfg <> ".cursor-attach-" <> show pid)
 
 -- | Ensure a FIFO exists, creating it if necessary.
 ensureFifo :: FilePath -> IO ()
@@ -176,7 +200,8 @@ replOpen cfg = do
   hClose stdoutH
   hClose stderrH
 
-  cursor <- newIORef 0
+  cursor <- Cur.newFile (ownerCursorPath cfg)
+  Cur.set cursor 0
   pure $ Repl cfg (Just ph) cursor
 
 -- | Attach to an already-running REPL (e.g. one started by another agent or
@@ -186,7 +211,8 @@ replOpen cfg = do
 --
 -- This enables multiple clients (agents or humans) to share one REPL session:
 -- they all write to the same stdin FIFO (serialized by the OS), see the
--- combined output in the log, and each maintains its own read cursor.
+-- combined output in the log, and each maintains its own read cursor
+-- (file-backed via the @cursor@ package).
 --
 -- Use 'replClose' on an attached Repl is a no-op.
 replAttach :: ReplConfig -> IO Repl
@@ -194,7 +220,9 @@ replAttach cfg = do
   -- Do not create FIFO or spawn; assume caller has set up the process
   -- reading the FIFO and logging output.
   ls <- readLines (replStdoutPath cfg)
-  cursor <- newIORef (length ls)
+  path <- attachCursorPath cfg
+  cursor <- Cur.newFile path
+  Cur.seekEnd cursor ls
   pure $ Repl cfg Nothing cursor
 
 -- | Close a REPL session.
@@ -222,15 +250,57 @@ replCommit r t =
 
 -- | Receive all new lines from the REPL's stdout.
 --
--- Reads the entire stdout file, drops lines already consumed
--- (tracked by cursor), returns the rest, and advances the cursor.
+-- Reads the entire stdout file, returns lines after the cursor position
+-- (via 'Cur.pollLines'), and advances the cursor.
 replEmit :: Repl -> IO [Text]
 replEmit r = do
-  cursor <- readIORef (replCursor r)
   ls <- readLines (replStdoutPath (replConfig r))
-  let newLines = drop cursor ls
-  writeIORef (replCursor r) (length ls)
-  pure newLines
+  Cur.pollLines (replCursor r) ls
+
+-- ---------------------------------------------------------------------------
+-- Write claim — exclusive multi-agent eval
+-- ---------------------------------------------------------------------------
+
+-- | Try to take the write token.  Returns 'True' if acquired (or already
+-- held by the same name).  Returns 'False' if another holder has it.
+replClaim :: Repl -> String -> IO Bool
+replClaim r name = do
+  let path = replTokenPath (replConfig r)
+  exists <- doesFileExist path
+  if not exists
+    then do
+      writeFile path (name <> "\n")
+      pure True
+    else do
+      holder <- filter (not . isSpace) <$> readFile path
+      pure (holder == name)
+
+-- | Release the write token if held by @name@.  No-op if free or held by other.
+replRelease :: Repl -> String -> IO ()
+replRelease r name = do
+  let path = replTokenPath (replConfig r)
+  exists <- doesFileExist path
+  when exists do
+    holder <- filter (not . isSpace) <$> readFile path
+    when (holder == name) $ removeFile path
+
+-- | Claim → commit → sync to prompt → release.
+--
+-- Returns 'Nothing' if the claim failed (token held by another) or if
+-- 'replSync' timed out.  On success returns the response lines (prompt
+-- line included, as with 'replSync').
+replEval :: Repl -> String -> Text -> IO (Maybe [Text])
+replEval r name cmd = do
+  ok <- replClaim r name
+  if not ok
+    then pure Nothing
+    else do
+      -- Drain pending so the response window starts clean.
+      _ <- replEmit r
+      replCommit r cmd
+      m <- replSync r
+      replRelease r name
+      pure m
 
 -- | Read all lines from a file, including a possible partial last line
 -- (common when REPLs print a prompt with putStr and no trailing newline).
@@ -357,7 +427,8 @@ startCabalRepl dir = do
         defaultReplConfig
           { replCommand = "cabal",
             replArgs = ["repl"],
-            replWorkingDir = dir
+            replWorkingDir = dir,
+            replTokenPath = "/tmp/repl-stdout.md.token"
           }
   r <- replOpen cfg
   -- consume the initial prompt / guff
@@ -416,7 +487,8 @@ startAgent workDir = do
             replWorkingDir = workDir,
             replStdinPath = "/tmp/agent-stdin",
             replStdoutPath = "/tmp/agent-stdout.md",
-            replStderrPath = "/tmp/agent-stderr.md"
+            replStderrPath = "/tmp/agent-stderr.md",
+            replTokenPath = "/tmp/agent-stdout.md.token"
           }
   r <- replOpen cfg
   -- Consume startup guff: banner, tool list, welcome message, first prompt.

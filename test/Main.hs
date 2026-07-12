@@ -137,8 +137,11 @@ replTests =
     cleanLogs cfg =
       mapM_
         (\p -> whenM (doesFileExist p) (removeFile p))
-        [replStdinPath cfg, replStdoutPath cfg, replStderrPath cfg]
-        >> whenM (doesFileExist (replStdinPath cfg)) (removeFile (replStdinPath cfg))
+        [ replStdinPath cfg,
+          replStdoutPath cfg,
+          replStderrPath cfg,
+          replStdoutPath cfg <> ".cursor"
+        ]
 
 -- ---------------------------------------------------------------------------
 -- Channel tests (multi-agent comms using cat bus)

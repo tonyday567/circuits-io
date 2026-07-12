@@ -1,5 +1,6 @@
 packages:
   circuits-io.cabal
   ../circuits/circuits.cabal
+  ../cursor
 
 write-ghc-environment-files: always
