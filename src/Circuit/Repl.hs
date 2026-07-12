@@ -41,6 +41,8 @@ module Circuit.Repl
     Repl,
     replGetConfig,
     replOpen,
+    replOpenInject,
+    replOpenPty,
     replClose,
     replAttach,
 
@@ -76,8 +78,9 @@ module Circuit.Repl
     isGuff,
     startCabalRepl,
 
-    -- * Hermes agent conveniences
+    -- * Hermes / agent conveniences
     startAgent,
+    startPythonPty,
     hermesPrompt,
     hermesCommand,
   )
@@ -85,10 +88,11 @@ where
 
 import Circuit (Trace (..))
 import Control.Arrow (Kleisli (..))
-import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
-import Control.Monad (unless, when)
+import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
+import Control.Exception (IOException, bracket, try)
+import Control.Monad (forever, unless, void, when)
 import Cursor qualified as Cur
+import Data.ByteString qualified as BS
 import Data.Char (isSpace)
 import Data.Foldable (for_)
 import Data.IORef
@@ -96,13 +100,22 @@ import Data.List (find)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Environment (getEnv)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO
 import System.Posix.Process (getProcessID)
+import System.Posix.Pty
+  ( Pty,
+    closePty,
+    spawnWithPty,
+    tryReadPty,
+    writePty,
+  )
 import System.Process
+import System.Timeout (timeout)
 import Prelude
 
 -- ---------------------------------------------------------------------------
@@ -146,24 +159,46 @@ defaultReplConfig =
 -- Repl handle
 -- ---------------------------------------------------------------------------
 
+-- | Transport backend.  Sum type (not a typeclass) until a third mode appears.
+--
+--   * 'BackendFifo' — child writes log via redirected fds; commit opens write-end.
+--   * 'BackendPty'  — parent pumps master reads into log; commit uses 'writePty'.
+--   * 'BackendInject' — tests / fakes: commit is a pure IO action (no OS process).
+data Backend
+  = BackendFifo
+      { beFifo :: FilePath,
+        beFifoPh :: Maybe ProcessHandle
+      }
+  | BackendPty
+      { bePty :: Pty,
+        bePtyPh :: ProcessHandle,
+        bePump :: ThreadId
+      }
+  | BackendInject
+      { beInject :: Text -> IO ()
+      }
+
 -- | A live REPL session.
 --
--- Internally tracks a line cursor ('Cur.Cursor', file-backed) so 'replEmit'
--- only returns output that has arrived since the last call.  File backing
--- means attach cursors survive restarts and match muster/process-harness.
+-- Shared across backends: log paths (in 'ReplConfig'), 'Cur.Cursor', claim
+-- token, prompt sync.  Transport is 'Backend' only.
 data Repl = Repl
   { replConfig :: ReplConfig,
-    replProcessHandle :: Maybe ProcessHandle,
+    replBackend :: Backend,
     replCursor :: Cur.Cursor,
     -- | Last trailing partial line we already surfaced (hanging prompt).
-    --   Used so idle polls do not re-emit the same @ghci> @ forever, while
-    --   still re-surfacing it after complete output (answer + new prompt).
     replLastPartial :: IORef (Maybe Text)
   }
 
 -- | Config used to open / attach this handle.
 replGetConfig :: Repl -> ReplConfig
 replGetConfig = replConfig
+
+-- | Build a 'Repl' over an existing log + backend (shared constructor).
+mkRepl :: ReplConfig -> Backend -> Cur.Cursor -> IO Repl
+mkRepl cfg backend cursor = do
+  lastP <- newIORef Nothing
+  pure $ Repl cfg backend cursor lastP
 
 -- | Cursor file beside the stdout log.  Owner uses @.cursor@; attach uses
 -- @.cursor-attach-<pid>@ so concurrent readers do not share position.
@@ -219,54 +254,86 @@ replOpen cfg = do
 
   cursor <- Cur.newFile (ownerCursorPath cfg)
   Cur.set cursor 0
-  lastP <- newIORef Nothing
-  pure $ Repl cfg (Just ph) cursor lastP
+  mkRepl cfg (BackendFifo (replStdinPath cfg) (Just ph)) cursor
 
--- | Attach to an already-running REPL (e.g. one started by another agent or
--- manually with the same FIFO paths). Does not spawn or manage the process
--- lifetime. The cursor is initialized to the current end of the stdout log
--- so subsequent 'replEmit' only sees new output.
---
--- This enables multiple clients (agents or humans) to share one REPL session:
--- they all write to the same stdin FIFO (serialized by the OS), see the
--- combined output in the log, and each maintains its own read cursor
--- (file-backed via the @cursor@ package).
---
--- Use 'replClose' on an attached Repl is a no-op.
+-- | Attach to an already-running REPL (same FIFO/log paths). Does not own
+-- process lifetime. Cursor starts at log tail. Commit still writes the FIFO.
 replAttach :: ReplConfig -> IO Repl
 replAttach cfg = do
-  -- Do not create FIFO or spawn; assume caller has set up the process
-  -- reading the FIFO and logging output.
   content <- readLogContent (replStdoutPath cfg)
   let (complete, _) = splitComplete content
   path <- attachCursorPath cfg
   cursor <- Cur.newFile path
   Cur.seekEnd cursor complete
-  lastP <- newIORef Nothing
-  pure $ Repl cfg Nothing cursor lastP
+  mkRepl cfg (BackendFifo (replStdinPath cfg) Nothing) cursor
 
--- | Close a REPL session.
---
--- Sends SIGTERM to the process (if this Repl owns it, i.e. was created via
--- 'replOpen'). The FIFO and log files are left in place for inspection.
--- For 'replAttach' sessions, this is a no-op.
+-- | Open a log-only 'Repl' whose 'replCommit' is a pure inject action.
+-- Used by dual-mode backend mocks (FakeFifo / FakePty) with no OS process.
+replOpenInject :: ReplConfig -> (Text -> IO ()) -> IO Repl
+replOpenInject cfg inject = do
+  appendFile (replStdoutPath cfg) ""
+  cursor <- Cur.newFile (ownerCursorPath cfg)
+  Cur.set cursor 0
+  mkRepl cfg (BackendInject inject) cursor
+
+-- | Open a process connected via PTY. Parent pumps master → stdout log.
+-- State files still follow 'ReplConfig' paths (session dir).
+replOpenPty :: ReplConfig -> IO Repl
+replOpenPty cfg = do
+  createDirectoryIfMissing True (takeDirectory (replStdoutPath cfg))
+  appendFile (replStdoutPath cfg) ""
+  (pty, ph) <-
+    spawnWithPty
+      Nothing
+      True
+      (replCommand cfg)
+      (replArgs cfg)
+      (100, 30)
+  pumpTid <- forkIO (pumpPtyToLog pty (replStdoutPath cfg))
+  cursor <- Cur.newFile (ownerCursorPath cfg)
+  Cur.set cursor 0
+  mkRepl cfg (BackendPty pty ph pumpTid) cursor
+
+-- | Pump PTY master reads into the append-only log (byte chunks).
+pumpPtyToLog :: Pty -> FilePath -> IO ()
+pumpPtyToLog pty logPath = go
+  where
+    go = do
+      r <- try @IOException (tryReadPty pty)
+      case r of
+        Left _ -> pure ()
+        Right (Left _) -> go
+        Right (Right bs)
+          | BS.null bs -> go
+          | otherwise -> BS.appendFile logPath bs >> go
+
+-- | Close a REPL session (backend-specific teardown; must not hang).
 replClose :: Repl -> IO ()
-replClose r = for_ (replProcessHandle r) terminateProcess
+replClose r = case replBackend r of
+  BackendFifo {beFifoPh} -> for_ beFifoPh terminateProcess
+  BackendPty {bePty, bePtyPh, bePump} -> do
+    void $ try @IOException (terminateProcess bePtyPh)
+    void $
+      timeout 500_000 $ do
+        void $ try @IOException (closePty bePty)
+        killThread bePump
+  BackendInject {} -> pure ()
 
 -- ---------------------------------------------------------------------------
 -- Primitives
 -- ---------------------------------------------------------------------------
 
--- | Send one line to the REPL.
---
--- Opens the FIFO write-end, writes the line + newline, flushes, and
--- closes.  This avoids holding the write-end open (which would block
--- if the child exits).
+-- | Send one line to the REPL (backend-dispatched).
 replCommit :: Repl -> Text -> IO ()
-replCommit r t =
-  withFile (replStdinPath (replConfig r)) WriteMode $ \h -> do
-    TIO.hPutStrLn h t
-    hFlush h
+replCommit r t = case replBackend r of
+  BackendFifo {beFifo} ->
+    withFile beFifo WriteMode $ \h -> do
+      TIO.hPutStrLn h t
+      hFlush h
+  BackendPty {bePty} ->
+    writePty bePty (encodeUtf8 (t <> "\n"))
+  BackendInject {beInject} ->
+    beInject t
 
 -- | Receive all new lines from the REPL's stdout.
 --
@@ -592,6 +659,30 @@ startAgent workDir = do
   -- Consume startup guff: banner, tool list, welcome message, first prompt.
   _ <- replSyncWith hermesPrompt 60000000 r -- 60 second timeout
   pure r
+
+-- | Agent-start proof path: @python3 -q@ over PTY (no ANSI filter yet).
+-- Session files under @$HOME/mg/logs/process-harness/<session>/@.
+startPythonPty :: String -> IO Repl
+startPythonPty session = do
+  home <- getEnv "HOME"
+  let dir = home </> "mg" </> "logs" </> "process-harness" </> session
+  createDirectoryIfMissing True dir
+  let cfg =
+        defaultReplConfig
+          { replCommand = "python3",
+            replArgs = ["-q"],
+            replWorkingDir = ".",
+            replStdinPath = dir </> "stdin.fifo", -- unused for PTY
+            replStdoutPath = dir </> "stdout.md",
+            replStderrPath = dir </> "stderr.md",
+            replTokenPath = dir </> "write.token"
+          }
+  writeFile (replStdoutPath cfg) ""
+  r <- replOpenPty cfg
+  m <- replSyncWith (\t -> ">>>" `T.isSuffixOf` T.stripEnd t) 15_000_000 r
+  case m of
+    Nothing -> fail "startPythonPty: timed out waiting for >>>"
+    Just _ -> pure r
 
 -- TODO (open thread for Circuit.Agent integration):
 -- We now have:

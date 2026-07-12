@@ -11,6 +11,7 @@ import Control.Monad (forM_, when)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import MockBackend (MockMode (..), openMockRepl)
 import System.Directory (doesFileExist, removeFile)
 import System.IO (hPutStrLn, stderr)
 import System.Process (terminateProcess)
@@ -23,6 +24,7 @@ main =
     testGroup
       "circuits-io"
       [ replTests,
+        backendTests,
         channelTests,
         sessionTests
       ]
@@ -182,6 +184,46 @@ replTests =
           replStdoutPath cfg <> ".cursor",
           replTokenPath cfg
         ]
+
+-- ---------------------------------------------------------------------------
+-- Backend abstraction (FakeFifo vs FakePty, same Repl API)
+-- ---------------------------------------------------------------------------
+
+backendTests :: TestTree
+backendTests =
+  testGroup
+    "Backend dual-mode mocks"
+    [ testCase "FakeFifo: emit/claim/eval" $ dualMode FakeFifo "fifo",
+      testCase "FakePty: emit/claim/eval" $ dualMode FakePty "pty",
+      testCase "both modes: second claim rejected until release" $ do
+        forM_ [FakeFifo, FakePty] $ \mode -> do
+          r <- openMockRepl mode ("claim-" <> show mode)
+          _ <- replSyncWith (T.isSuffixOf "mock> ") 2_000_000 r
+          okA <- replClaim r "alice"
+          assertBool (show mode <> " alice claim") okA
+          okB <- replClaim r "bob"
+          assertBool (show mode <> " bob rejected") (not okB)
+          replRelease r "alice"
+          okB2 <- replClaim r "bob"
+          assertBool (show mode <> " bob after release") okB2
+          replRelease r "bob"
+          replClose r
+    ]
+  where
+    dualMode mode tag = do
+      r <- openMockRepl mode tag
+      _ <- replSyncWith (T.isSuffixOf "mock> ") 2_000_000 r
+      -- claim + eval
+      m <- replEval r "alice" "hello"
+      case m of
+        Nothing -> assertFailure (tag <> ": eval failed")
+        Just ls -> do
+          let combined = T.unlines ls
+          assertBool (tag <> ": has echo") ("echo: hello" `T.isInfixOf` combined)
+      -- emit should be idle after eval drained
+      extra <- replEmit r
+      assertBool (tag <> ": emit empty after eval") (null extra)
+      replClose r
 
 -- ---------------------------------------------------------------------------
 -- Channel tests (multi-agent comms using cat bus)
