@@ -79,10 +79,21 @@ module Circuit.Repl
     startCabalRepl,
 
     -- * Hermes / agent conveniences
+    AgentConfig (..),
+    defaultHermesConfig,
+    agentReplConfig,
     startAgent,
+    startAgentPty,
     startPythonPty,
     hermesPrompt,
     hermesCommand,
+    hermesEval,
+
+    -- * Hermes one-shot path (no PTY / no TUI)
+    hermesOneShot,
+    hermesEvalOneShot,
+    hermesExtractResponse,
+    hermesSessionId,
   )
 where
 
@@ -97,13 +108,14 @@ import Data.Char (isSpace)
 import Data.Foldable (for_)
 import Data.IORef
 import Data.List (find)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Environment (getEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO
 import System.Posix.Process (getProcessID)
@@ -604,23 +616,214 @@ startCabalRepl dir = do
 -- Hermes agent helpers
 -- ---------------------------------------------------------------------------
 
--- | Hermes prompt: the leading @❯@ character.
-hermesPrompt :: Text -> Bool
-hermesPrompt t = "❯" `T.isPrefixOf` T.stripStart t
-
--- | Send a prompt to a Hermes agent and return the clean response.
+-- | Strip ANSI escape sequences and carriage returns from a line so
+-- prompt/content detection works on Hermes/grok TUI output.
 --
--- Commits the line, waits for the next @❯@ prompt, and filters
--- out ANSI escape sequences, status bars, and other guff.
+-- Handles CSI sequences (ESC [ ... final-byte), including cursor-shape
+-- sequences such as @CSI 2 SP q@, plus standalone OSC / two-character
+-- escapes.
+stripAnsi :: Text -> Text
+stripAnsi = T.pack . go . T.unpack
+  where
+    go [] = []
+    go ('\ESC' : '[' : rest) = go (dropCsi rest)
+    go ('\ESC' : ']' : rest) = go (dropOsc rest)
+    go ('\ESC' : '(' : _ : rest) = go rest
+    go ('\ESC' : ')' : _ : rest) = go rest
+    go ('\ESC' : '*' : _ : rest) = go rest
+    go ('\ESC' : '+' : _ : rest) = go rest
+    go ('\ESC' : '-' : _ : rest) = go rest
+    go ('\ESC' : '.' : _ : rest) = go rest
+    go ('\ESC' : '/' : _ : rest) = go rest
+    go ('\ESC' : _ : rest) = go rest
+    go ('\r' : rest) = go rest
+    go (c : rest) = c : go rest
+
+    -- CSI: parameter bytes (0x30-0x3F), then intermediate bytes (0x20-0x2F),
+    -- then final byte (0x40-0x7E).  Cursor shape @CSI Ps SP q@ is included
+    -- because space is an intermediate byte and q is a final byte.
+    dropCsi xs =
+      let params = dropWhile isParam xs
+          inters = dropWhile isInter params
+       in case inters of
+            [] -> []
+            (_ : ys) -> ys
+    isParam c = c >= '\x30' && c <= '\x3f'
+    isInter c = c >= '\x20' && c <= '\x2f'
+
+    -- OSC: BEL terminates; otherwise ST (ESC \\) terminates.
+    dropOsc xs = case break (`elem` ['\x07', '\ESC']) xs of
+      (_, '\x07' : ys) -> ys
+      (_, '\ESC' : '\\' : ys) -> ys
+      (_, '\ESC' : _ : ys) -> ys
+      _ -> []
+
+-- | Hermes prompt detection (classic @--cli@ REPL and residual TUI chrome).
+--
+-- After ANSI/CR strip, a prompt line is one that:
+--
+--   * starts with @❯@ (observed on @hermes chat --cli@ prompt_toolkit UI), or
+--   * is a short line ending in @>@ (fallback classic REPL shapes).
+hermesPrompt :: Text -> Bool
+hermesPrompt t =
+  let s = T.strip (stripAnsi t)
+   in or
+        [ "❯" `T.isPrefixOf` s
+        , T.length s <= 8 && ">" `T.isSuffixOf` s && not ("->" `T.isInfixOf` s)
+        ]
+
+-- | Clean Hermes response lines: strip ANSI, drop trailing prompts, prefer
+-- the last response box, else guff-filter.
+--
+-- Hermes --cli redraws the status bar continuously and may emit intermediate
+-- prompt-shaped lines.  The actual response is always drawn inside the last
+-- @╭─ ⚕ Hermes ... ╰─ ... ╯@ box before the final prompt, so we extract that
+-- box rather than relying on prompt position.
+cleanHermesResponse :: [Text] -> [Text]
+cleanHermesResponse ls =
+  let clean = map stripAnsi ls
+      -- Drop trailing prompt lines so the response box (which precedes the
+      -- prompt) remains at the end.
+      noTrailingPrompt = reverse (dropWhile hermesPrompt (reverse clean))
+      boxed = extractHermesBox noTrailingPrompt
+   in if null boxed
+        then filter (not . isHermesGuff) noTrailingPrompt
+        else boxed
+
+-- | Send a prompt to a Hermes agent and return the clean response (no claim).
+--
+-- Commits the line, waits for the next Hermes prompt, strips ANSI, and
+-- extracts the content between response box markers when present.
 hermesCommand :: Repl -> Text -> IO [Text]
 hermesCommand r cmd = do
+  _ <- replEmit r -- drain
   replCommit r cmd
-  mLines <- replSyncWith hermesPrompt 120000000 r -- 2 minute timeout
+  threadDelay 100_000
+  mLines <- replSyncWith hermesPrompt 120_000_000 r -- 2 minute timeout
+  extra <- replEmit r
   pure $ case mLines of
     Nothing -> []
-    Just ls -> filter (not . isHermesGuff) (takeWhile (not . hermesPrompt) ls)
+    Just ls -> cleanHermesResponse (ls <> extra)
+
+-- | Multi-turn Hermes eval with write-token claim (preferred agent path).
+--
+-- @
+--   r <- startAgentPty (defaultHermesConfig "sess")
+--   Just a <- hermesEval r "alice" "hello"
+--   Just b <- hermesEval r "alice" "what did I just say?"
+-- @
+hermesEval :: Repl -> String -> Text -> IO (Maybe [Text])
+hermesEval r name cmd = do
+  ok <- replClaim r name
+  if not ok
+    then pure Nothing
+    else do
+      out <- hermesCommand r cmd
+      replRelease r name
+      pure (Just out)
+
+-- | Extract the Hermes session id from program output.
+--
+-- Looks for the line @Session: <id>@ emitted at the end of a @hermes chat -q@
+-- run.
+hermesSessionId :: Text -> Maybe Text
+hermesSessionId txt =
+  listToMaybe
+    [ sid
+      | line <- T.lines txt,
+        let s = T.stripStart line,
+        "Session:" `T.isPrefixOf` s,
+        let rest = T.drop 8 (T.stripStart s),
+        let sid = T.stripStart rest,
+        not (T.null sid)
+    ]
+
+-- | Extract response content from clean Hermes one-shot stdout.
+--
+-- Works on the plain-text box drawn by @hermes chat -q@ (no ANSI because no
+-- PTY).  Returns the non-guff lines inside the last @╭─ ⚕ Hermes ... ╰─ ... ╯@
+-- box.
+hermesExtractResponse :: Text -> [Text]
+hermesExtractResponse = extractHermesBox . T.lines . T.filter (/= '\r')
+
+-- | Run Hermes in one-shot mode for a single query.
+--
+-- Spawns @hermes chat [--resume SESS] -q QUERY@, captures stdout/stderr, and
+-- returns the response lines plus the new session id.  The session id can be
+-- passed back in on the next turn to preserve conversation context.
+--
+-- This is the recommended agent path: no PTY, no TUI redraw, no ANSI parsing.
+--
+-- @
+--   Right (resp1, sid1) <- hermesOneShot Nothing "remember banana"
+--   Right (resp2, _  ) <- hermesOneShot (Just sid1) "what did I remember?"
+-- @
+hermesOneShot :: Maybe Text -> Text -> IO (Either Text ([Text], Text))
+hermesOneShot mSession query = do
+  let resumeArgs = maybe [] (\s -> ["--resume", T.unpack s]) mSession
+      args = ["chat"] ++ resumeArgs ++ ["-q", T.unpack query]
+  (ec, out, err) <- readProcessWithExitCode "hermes" args ""
+  let output = T.pack out <> T.pack err
+  case ec of
+    ExitFailure _ -> pure (Left output)
+    ExitSuccess ->
+      case hermesSessionId output of
+        Nothing -> pure (Left "hermesOneShot: no Session: line in output")
+        Just sid -> pure (Right (hermesExtractResponse output, sid))
+
+-- | Stateful wrapper around 'hermesOneShot' for multi-turn conversation.
+--
+-- Keeps the current Hermes session id in an 'IORef'.  Returns 'Nothing' on a
+-- process or parsing failure.
+hermesEvalOneShot :: IORef (Maybe Text) -> Text -> IO (Maybe [Text])
+hermesEvalOneShot ref query = do
+  mSession <- readIORef ref
+  result <- hermesOneShot mSession query
+  case result of
+    Left err -> do
+      TIO.hPutStrLn stderr ("hermesEvalOneShot failed: " <> err)
+      pure Nothing
+    Right (resp, sid) -> do
+      writeIORef ref (Just sid)
+      pure (Just resp)
+
+-- | Extract lines inside the last Hermes response box.
+--
+-- Hermes draws responses as:
+--
+-- @
+--   ╭─ ⚕ Hermes ── ...
+--     response line 1
+--     response line 2
+--   ╰──────────────── ...
+-- @
+--
+-- We take the /last/ such box in the output to survive intermediate redraws
+-- and status bars.  Returns lines strictly between the markers, with leading
+-- whitespace/box-drawing prefix stripped.
+extractHermesBox :: [Text] -> [Text]
+extractHermesBox ls =
+  case findLastBox of
+    Nothing -> []
+    Just (start, end) ->
+      filter (not . isHermesGuff) $
+        map T.strip (take (end - start - 1) (drop (start + 1) ls))
+  where
+    indexed = zip [0 ..] ls
+    -- Use infix matching because cursor-positioning ANSI fragments can leave
+    -- box-drawing prefix characters before the marker after stripping.
+    closes = [i | (i, x) <- indexed, "╰─" `T.isInfixOf` x]
+    opens = [i | (i, x) <- indexed, "╭─ ⚕ Hermes" `T.isInfixOf` x]
+    findLastBox =
+      listToMaybe
+        [ (open, close)
+          | close <- reverse closes,
+            open <- reverse opens,
+            open < close
+        ]
 
 -- | Heuristic for Hermes UI lines that aren't actual response content.
+-- Operates on ANSI-stripped text.
 isHermesGuff :: Text -> Bool
 isHermesGuff t =
   or
@@ -634,21 +837,25 @@ isHermesGuff t =
       "Resume this session" `T.isPrefixOf` t,
       "⚕" `T.isPrefixOf` T.stripStart t,
       "✦ Tip:" `T.isPrefixOf` t,
+      "synthesizing..." `T.isInfixOf` t,
+      "Initializing agent..." `T.isInfixOf` t,
+      -- separator / spinner noise
+      "─" `T.count` t >= 20,
+      -- progress / status bars: contain box-drawing and timing symbols
+      ("│" `T.isInfixOf` t && ("%" `T.isInfixOf` t || "⏱" `T.isInfixOf` t)),
       T.all isSpace t,
       T.null t
     ]
 
--- | Start a Hermes agent connected to a FIFO.
+-- | Start a Hermes agent connected to a FIFO (legacy).
 --
--- Spawns @hermes chat --quiet@, waits for it to finish printing
--- the startup banner and first prompt, and returns a 'Repl' handle
--- ready for 'hermesCommand'.
+-- Prefer 'startAgentPty' with 'defaultHermesConfig' (@hermes chat --cli@).
 startAgent :: FilePath -> IO Repl
 startAgent workDir = do
   let cfg =
         defaultReplConfig
           { replCommand = "hermes",
-            replArgs = ["chat", "--quiet", "--max-turns", "50"],
+            replArgs = ["chat", "--cli", "--max-turns", "50"],
             replWorkingDir = workDir,
             replStdinPath = "/tmp/agent-stdin",
             replStdoutPath = "/tmp/agent-stdout.md",
@@ -682,6 +889,76 @@ startPythonPty session = do
   m <- replSyncWith (\t -> ">>>" `T.isSuffixOf` T.stripEnd t) 15_000_000 r
   case m of
     Nothing -> fail "startPythonPty: timed out waiting for >>>"
+    Just _ -> pure r
+
+-- ---------------------------------------------------------------------------
+-- Agent configuration and PTY agent start
+-- ---------------------------------------------------------------------------
+
+-- | Configuration for spawning an agent CLI over PTY.
+data AgentConfig = AgentConfig
+  { -- | Executable name (e.g. @"hermes"@).
+    agentCommand :: String,
+    -- | Arguments (e.g. @["chat", "--quiet", "--max-turns", "50"]@).
+    agentArgs :: [String],
+    -- | Session name, used for state directory under
+    -- @~/mg/logs/process-harness/<session>/@.
+    agentSession :: String,
+    -- | Working directory for the agent process.
+    agentWorkingDir :: FilePath
+  }
+  deriving (Show, Eq)
+
+-- | Sensible defaults for a Hermes agent session over classic @--cli@ REPL.
+--
+-- Spawns @hermes chat --cli@ (prompt_toolkit classic interface, real
+-- stdin/stdout) — not TUI, not oneshot @-z@/@-q@.  The harness provides
+-- the terminal via 'BackendPty'.
+defaultHermesConfig :: String -> AgentConfig
+defaultHermesConfig session =
+  AgentConfig
+    { agentCommand = "hermes",
+      agentArgs = ["chat", "--cli", "--max-turns", "50"],
+      agentSession = session,
+      agentWorkingDir = "."
+    }
+
+-- | Build a 'ReplConfig' for an agent from 'AgentConfig'.
+agentReplConfig :: AgentConfig -> IO ReplConfig
+agentReplConfig cfg = do
+  home <- getEnv "HOME"
+  let dir = home </> "mg" </> "logs" </> "process-harness" </> agentSession cfg
+  createDirectoryIfMissing True dir
+  pure
+    defaultReplConfig
+      { replCommand = agentCommand cfg,
+        replArgs = agentArgs cfg,
+        replWorkingDir = agentWorkingDir cfg,
+        replStdinPath = dir </> "stdin.fifo", -- unused for PTY
+        replStdoutPath = dir </> "stdout.md",
+        replStderrPath = dir </> "stderr.md",
+        replTokenPath = dir </> "write.token"
+      }
+
+-- | Start an agent CLI connected via PTY (preferred multi-turn agent path).
+--
+-- Spawns the configured command on a pseudo-terminal, pumps output into
+-- the session log, and waits for the agent's prompt.  For Hermes, use
+-- 'defaultHermesConfig' (@hermes chat --cli@) and 'hermesEval' for
+-- claim-scoped multi-turn turns.
+startAgentPty :: AgentConfig -> IO Repl
+startAgentPty cfg = do
+  cfg' <- agentReplConfig cfg
+  writeFile (replStdoutPath cfg') ""
+  r <- replOpenPty cfg'
+  m <- replSyncWith hermesPrompt 120_000_000 r -- 2 minute startup timeout
+  case m of
+    Nothing ->
+      fail $
+        "startAgentPty: timed out waiting for agent prompt (session "
+          <> agentSession cfg
+          <> "). Expected classic --cli prompt (❯). Check log: "
+          <> replStdoutPath cfg'
     Just _ -> pure r
 
 -- TODO (open thread for Circuit.Agent integration):

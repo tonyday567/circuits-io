@@ -25,6 +25,7 @@ main =
       "circuits-io"
       [ replTests,
         backendTests,
+        hermesOneShotTests,
         channelTests,
         sessionTests
       ]
@@ -555,6 +556,62 @@ sessionTests =
                   threadDelay delay
                   let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
                   go elapsed' delay' acc'
+
+-- ---------------------------------------------------------------------------
+-- Hermes one-shot parsing tests
+-- ---------------------------------------------------------------------------
+
+hermesOneShotTests :: TestTree
+hermesOneShotTests =
+  testGroup
+    "Hermes one-shot parsing"
+    [ testCase "extracts single-line response" $
+        assertEqual
+          "hello response"
+          ["Hello."]
+          (hermesExtractResponse sampleHello),
+      testCase "extracts multi-line response" $
+        assertEqual
+          "multi-line response"
+          ["Line one.", "Line two."]
+          (hermesExtractResponse sampleMultiLine),
+      testCase "returns empty when no box" $
+        assertEqual
+          "no box"
+          []
+          (hermesExtractResponse "no response here"),
+      testCase "extracts session id" $
+        assertEqual
+          "session id"
+          (Just "20260713_102038_9524e4")
+          (hermesSessionId sampleHello)
+    ]
+  where
+    sampleHello =
+      T.unlines
+        [ "Warning: Unknown toolsets: messaging, moa",
+          "Query: say hello and stop",
+          "Initializing agent...",
+          "────────────────────────────────────────",
+          "",
+          "╭─ ⚕ Hermes ───────────────────────────────────────────────────────────────────╮",
+          "    Hello.",
+          "╰──────────────────────────────────────────────────────────────────────────────╯",
+          "",
+          "Resume this session with:",
+          "  hermes --resume 20260713_102038_9524e4",
+          "",
+          "Session:        20260713_102038_9524e4",
+          "Duration:       3s"
+        ]
+    sampleMultiLine =
+      T.unlines
+        [ "╭─ ⚕ Hermes ──╮",
+          "    Line one.",
+          "    Line two.",
+          "╰──────────────╯",
+          "Session:  abc123"
+        ]
 
 -- ---------------------------------------------------------------------------
 -- Shared helpers
