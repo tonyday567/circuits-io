@@ -14,7 +14,6 @@ import Data.Text qualified as T
 import MockBackend (MockMode (..), openMockRepl)
 import System.Directory (doesFileExist, removeFile)
 import System.IO (hPutStrLn, stderr)
-import System.Process (terminateProcess)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -25,26 +24,48 @@ main =
       "circuits-io"
       [ replTests,
         backendTests,
-        hermesOneShotTests,
         channelTests,
         sessionTests
       ]
 
 -- ---------------------------------------------------------------------------
--- Repl pipeline tests (mock)
+-- Local tie helper (tests only — not part of Circuit.Repl)
+--
+-- Timeout lives here, on the circuit that joins free emit to a boundary.
+-- ---------------------------------------------------------------------------
+
+-- | Poll 'replEmit' until a line satisfies @isBoundary@ or timeout (µs).
+emitUntil :: (Text -> Bool) -> Int -> Repl -> IO (Maybe [Text])
+emitUntil isBoundary timeoutUs r = go 0 [] 10000
+  where
+    go elapsed acc delay = do
+      news <- replEmit r
+      let acc' = acc <> news
+      if any isBoundary news
+        then pure (Just acc')
+        else do
+          let elapsed' = elapsed + delay
+          if elapsed' >= timeoutUs
+            then pure Nothing
+            else do
+              threadDelay delay
+              let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
+              go elapsed' acc' delay'
+
+-- ---------------------------------------------------------------------------
+-- Repl dual-ends tests (mock)
 -- ---------------------------------------------------------------------------
 
 replTests :: TestTree
 replTests =
   testGroup
-    "Repl pipeline (mock)"
-    [ testCase "mock repl starts and responds to a simple query (no extra noise)" $ do
+    "Repl dual ends (mock)"
+    [ testCase "commit then emitUntil sees response" $ do
         let cfg =
               (baseCfg ["--prompt=mock> ", "--delay=20", "--no-extra-noise"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-1",
                   replStdoutPath = "/tmp/circuits-io-mock-out-1.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-1.md",
-                  replTokenPath = "/tmp/circuits-io-mock-out-1.md.token"
+                  replStderrPath = "/tmp/circuits-io-mock-err-1.md"
                 }
 
         cleanLogs cfg
@@ -52,30 +73,29 @@ replTests =
         repl <- replOpen cfg
         threadDelay 500_000
 
-        _ <- replSyncWith (T.isSuffixOf "mock> ") 5_000_000 repl -- consume welcome
+        _ <- emitUntil (T.isSuffixOf "mock> ") 5_000_000 repl -- drain welcome
         replCommit repl "hello"
-        mResp <- replSyncWith (T.isSuffixOf "mock> ") 10_000_000 repl
+        mResp <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
 
-        -- After consuming via sync, emit should see nothing new (tests the cursor logic)
+        -- After consuming via emitUntil, free emit should see nothing new
         extra <- replEmit repl
-        assertBool "emit after sync should be empty until next output" (null extra)
+        assertBool "emit after drain should be empty until next output" (null extra)
 
         replClose repl
         threadDelay 100_000
 
         case mResp of
-          Nothing -> assertFailure "Timed out waiting for prompt from mock"
+          Nothing -> assertFailure "Timed out waiting for boundary from mock"
           Just lines -> do
             let combined = T.unlines lines
             assertBool "should contain our input echo" ("received: hello" `T.isInfixOf` combined)
             assertBool "should contain a response line" ("echo: hello" `T.isInfixOf` combined),
-      testCase "multiple commands with extra noise still sync correctly" $ do
+      testCase "multiple commits with free emit" $ do
         let cfg =
               (baseCfg ["--prompt=mock> ", "--delay=15"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-2",
                   replStdoutPath = "/tmp/circuits-io-mock-out-2.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-2.md",
-                  replTokenPath = "/tmp/circuits-io-mock-out-2.md.token"
+                  replStderrPath = "/tmp/circuits-io-mock-err-2.md"
                 }
 
         cleanLogs cfg
@@ -83,32 +103,31 @@ replTests =
         repl <- replOpen cfg
         threadDelay 500_000
 
-        _ <- replSyncWith (T.isSuffixOf "mock> ") 5_000_000 repl
+        _ <- emitUntil (T.isSuffixOf "mock> ") 5_000_000 repl
 
-        -- first command
         replCommit repl "add 3"
-        m1 <- replSyncWith (T.isSuffixOf "mock> ") 10_000_000 repl
+        m1 <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
         case m1 of
           Nothing -> assertFailure "timeout on first command"
           Just ls -> assertBool "first result has 3" ("result: 3" `T.isInfixOf` T.unlines ls)
 
-        -- second command, using state
         replCommit repl "get"
-        m2 <- replSyncWith (T.isSuffixOf "mock> ") 10_000_000 repl
+        m2 <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
         case m2 of
           Nothing -> assertFailure "timeout on second command"
           Just ls -> do
             let combined = T.unlines ls
-            assertBool "second should see updated counter" ("counter: 1" `T.isInfixOf` combined || "counter: 2" `T.isInfixOf` combined) -- depending on counting
+            assertBool
+              "second should see updated counter"
+              ("counter: 1" `T.isInfixOf` combined || "counter: 2" `T.isInfixOf` combined)
         replClose repl
         threadDelay 100_000,
-      testCase "hanging prompt (no trailing newline) is still detected via improved readLines" $ do
+      testCase "hanging prompt (no trailing newline) still surfaces via emit" $ do
         let cfg =
               (baseCfg ["--prompt=mock-hang> ", "--delay=10", "--hanging-prompt", "--no-extra-noise"])
                 { replStdinPath = "/tmp/circuits-io-mock-in-3",
                   replStdoutPath = "/tmp/circuits-io-mock-out-3.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-3.md",
-                  replTokenPath = "/tmp/circuits-io-mock-out-3.md.token"
+                  replStderrPath = "/tmp/circuits-io-mock-err-3.md"
                 }
 
         cleanLogs cfg
@@ -116,9 +135,9 @@ replTests =
         repl <- replOpen cfg
         threadDelay 500_000
 
-        _ <- replSyncWith (T.isInfixOf "mock-hang>") 5_000_000 repl -- use infix because hanging may append
+        _ <- emitUntil (T.isInfixOf "mock-hang>") 5_000_000 repl
         replCommit repl "hello"
-        mResp <- replSyncWith (T.isInfixOf "mock-hang>") 10_000_000 repl
+        mResp <- emitUntil (T.isInfixOf "mock-hang>") 10_000_000 repl
 
         replClose repl
         threadDelay 100_000
@@ -128,38 +147,28 @@ replTests =
           Just lines -> do
             let combined = T.unlines lines
             assertBool "response captured even with hanging prompt" ("echo: hello" `T.isInfixOf` combined),
-      testCase "write token: second claim rejected until release" $ do
+      testCase "attach starts at log tail; commit still shared" $ do
         let cfg =
               (baseCfg ["--prompt=mock> ", "--delay=10", "--no-extra-noise"])
-                { replStdinPath = "/tmp/circuits-io-mock-in-claim",
-                  replStdoutPath = "/tmp/circuits-io-mock-out-claim.md",
-                  replStderrPath = "/tmp/circuits-io-mock-err-claim.md",
-                  replTokenPath = "/tmp/circuits-io-mock-out-claim.md.token"
+                { replStdinPath = "/tmp/circuits-io-mock-in-attach",
+                  replStdoutPath = "/tmp/circuits-io-mock-out-attach.md",
+                  replStderrPath = "/tmp/circuits-io-mock-err-attach.md"
                 }
         cleanLogs cfg
         owner <- replOpen cfg
         threadDelay 400_000
-        _ <- replSyncWith (T.isSuffixOf "mock> ") 5_000_000 owner
-        attacher <-
-          replAttach
-            cfg
-              { replStdinPath = replStdinPath cfg -- same session paths
-              }
+        _ <- emitUntil (T.isSuffixOf "mock> ") 5_000_000 owner
 
-        okA <- replClaim owner "alice"
-        assertBool "alice claims" okA
-        okB <- replClaim attacher "bob"
-        assertBool "bob rejected while alice holds" (not okB)
+        attacher <- replAttach cfg
+        -- attacher at tail: should not re-see welcome
+        stale <- replEmit attacher
+        assertBool "attach cursor at tail sees nothing yet" (null stale)
 
-        m <- replEval owner "alice" "hello"
-        case m of
-          Nothing -> assertFailure "alice eval failed"
-          Just ls -> assertBool "eval echo" ("echo: hello" `T.isInfixOf` T.unlines ls)
-
-        -- after eval, token released
-        okB2 <- replClaim attacher "bob"
-        assertBool "bob claims after alice eval" okB2
-        replRelease attacher "bob"
+        replCommit attacher "hello"
+        mResp <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 owner
+        case mResp of
+          Nothing -> assertFailure "owner did not see attach commit"
+          Just ls -> assertBool "echo" ("echo: hello" `T.isInfixOf` T.unlines ls)
 
         replClose owner
         threadDelay 100_000
@@ -172,8 +181,7 @@ replTests =
           replStdinPath = "/tmp/circuits-io-mock-in",
           replStdoutPath = "/tmp/circuits-io-mock-out.md",
           replStderrPath = "/tmp/circuits-io-mock-err.md",
-          replWorkingDir = ".",
-          replTokenPath = "/tmp/circuits-io-mock-out.md.token"
+          replWorkingDir = "."
         }
 
     cleanLogs cfg =
@@ -182,48 +190,33 @@ replTests =
         [ replStdinPath cfg,
           replStdoutPath cfg,
           replStderrPath cfg,
-          replStdoutPath cfg <> ".cursor",
-          replTokenPath cfg
+          replStdoutPath cfg <> ".cursor"
         ]
 
 -- ---------------------------------------------------------------------------
--- Backend abstraction (FakeFifo vs FakePty, same Repl API)
+-- Backend abstraction (FakeFifo vs FakePty, same free dual)
 -- ---------------------------------------------------------------------------
 
 backendTests :: TestTree
 backendTests =
   testGroup
     "Backend dual-mode mocks"
-    [ testCase "FakeFifo: emit/claim/eval" $ dualMode FakeFifo "fifo",
-      testCase "FakePty: emit/claim/eval" $ dualMode FakePty "pty",
-      testCase "both modes: second claim rejected until release" $ do
-        forM_ [FakeFifo, FakePty] $ \mode -> do
-          r <- openMockRepl mode ("claim-" <> show mode)
-          _ <- replSyncWith (T.isSuffixOf "mock> ") 2_000_000 r
-          okA <- replClaim r "alice"
-          assertBool (show mode <> " alice claim") okA
-          okB <- replClaim r "bob"
-          assertBool (show mode <> " bob rejected") (not okB)
-          replRelease r "alice"
-          okB2 <- replClaim r "bob"
-          assertBool (show mode <> " bob after release") okB2
-          replRelease r "bob"
-          replClose r
+    [ testCase "FakeFifo: commit/emit" $ dualMode FakeFifo "fifo",
+      testCase "FakePty: commit/emit" $ dualMode FakePty "pty"
     ]
   where
     dualMode mode tag = do
       r <- openMockRepl mode tag
-      _ <- replSyncWith (T.isSuffixOf "mock> ") 2_000_000 r
-      -- claim + eval
-      m <- replEval r "alice" "hello"
+      _ <- emitUntil (T.isSuffixOf "mock> ") 2_000_000 r
+      replCommit r "hello"
+      m <- emitUntil (T.isSuffixOf "mock> ") 2_000_000 r
       case m of
-        Nothing -> assertFailure (tag <> ": eval failed")
+        Nothing -> assertFailure (tag <> ": no boundary")
         Just ls -> do
           let combined = T.unlines ls
           assertBool (tag <> ": has echo") ("echo: hello" `T.isInfixOf` combined)
-      -- emit should be idle after eval drained
       extra <- replEmit r
-      assertBool (tag <> ": emit empty after eval") (null extra)
+      assertBool (tag <> ": emit empty after drain") (null extra)
       replClose r
 
 -- ---------------------------------------------------------------------------
@@ -429,13 +422,11 @@ sessionTests =
         sessB <- sessionAttach cfgB sessA
         threadDelay 200_000
 
-        -- A asks in a separate thread (it blocks until answered)
         resultMVar <- newEmptyMVar
         _ <- forkIO $ do
           reply <- ask sessA "should I refactor Baz.hs?"
           putMVar resultMVar reply
 
-        -- B waits for the question, then answers it
         qMsgs <- waitForMessages sessB 5_000_000
         case qMsgs of
           Nothing -> assertFailure "B timed out waiting for question"
@@ -446,7 +437,6 @@ sessionTests =
               Just (Question _sender qid _body) -> do
                 answer sessB qid "yes, definitely refactor"
 
-        -- Now A's ask should unblock
         reply <- takeMVar resultMVar
         assertEqual "answer body" "yes, definitely refactor" reply
 
@@ -463,25 +453,20 @@ sessionTests =
         sessB <- sessionAttach cfgB sessA
         threadDelay 200_000
 
-        -- Send two questions from A (use tell with manual framing
-        -- to avoid threading complexity of concurrent blocking ask)
         rawSend sessA "? a.q1 question one"
         rawSend sessA "? a.q2 question two"
         threadDelay 300_000
 
-        -- B polls until it sees at least 2 questions
         bMsgs <- waitForMessagesN sessB 2 5_000_000
         case bMsgs of
           Nothing -> assertFailure "B timed out waiting for questions"
           Just msgs -> do
             let qs = filter isQuestion msgs
             assertBool "should see at least two questions" (length qs >= 2)
-            -- Answer both
             forM_ qs $ \case
               Question _ qid _ -> answer sessB qid "done"
               _ -> pure ()
 
-        -- A should see the answers in its buffer
         threadDelay 300_000
         aMsgs <- recv sessA
         let answers = filter isAnswer aMsgs
@@ -522,7 +507,6 @@ sessionTests =
     findQuestion :: [Msg] -> Maybe Msg
     findQuestion = foldr (\m acc -> if isQuestion m then Just m else acc) Nothing
 
-    -- Poll recv until messages arrive or timeout
     waitForMessages :: Session -> Int -> IO (Maybe [Msg])
     waitForMessages sess timeoutUs = go 0 10000
       where
@@ -539,7 +523,6 @@ sessionTests =
                   let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
                   go elapsed' delay'
 
-    -- Poll recv until at least N messages accumulate, or timeout
     waitForMessagesN :: Session -> Int -> Int -> IO (Maybe [Msg])
     waitForMessagesN sess n timeoutUs = go 0 10000 []
       where
@@ -556,62 +539,6 @@ sessionTests =
                   threadDelay delay
                   let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
                   go elapsed' delay' acc'
-
--- ---------------------------------------------------------------------------
--- Hermes one-shot parsing tests
--- ---------------------------------------------------------------------------
-
-hermesOneShotTests :: TestTree
-hermesOneShotTests =
-  testGroup
-    "Hermes one-shot parsing"
-    [ testCase "extracts single-line response" $
-        assertEqual
-          "hello response"
-          ["Hello."]
-          (hermesExtractResponse sampleHello),
-      testCase "extracts multi-line response" $
-        assertEqual
-          "multi-line response"
-          ["Line one.", "Line two."]
-          (hermesExtractResponse sampleMultiLine),
-      testCase "returns empty when no box" $
-        assertEqual
-          "no box"
-          []
-          (hermesExtractResponse "no response here"),
-      testCase "extracts session id" $
-        assertEqual
-          "session id"
-          (Just "20260713_102038_9524e4")
-          (hermesSessionId sampleHello)
-    ]
-  where
-    sampleHello =
-      T.unlines
-        [ "Warning: Unknown toolsets: messaging, moa",
-          "Query: say hello and stop",
-          "Initializing agent...",
-          "────────────────────────────────────────",
-          "",
-          "╭─ ⚕ Hermes ───────────────────────────────────────────────────────────────────╮",
-          "    Hello.",
-          "╰──────────────────────────────────────────────────────────────────────────────╯",
-          "",
-          "Resume this session with:",
-          "  hermes --resume 20260713_102038_9524e4",
-          "",
-          "Session:        20260713_102038_9524e4",
-          "Duration:       3s"
-        ]
-    sampleMultiLine =
-      T.unlines
-        [ "╭─ ⚕ Hermes ──╮",
-          "    Line one.",
-          "    Line two.",
-          "╰──────────────╯",
-          "Session:  abc123"
-        ]
 
 -- ---------------------------------------------------------------------------
 -- Shared helpers

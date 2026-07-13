@@ -7,7 +7,7 @@
 --   * 'FakePty'   — commit enqueues to a 'Chan'; a pump thread appends
 --     to the log (parent-pumps-bytes model).
 --
--- Both expose the same 'Repl' handle (cursor / claim / sync / eval).
+-- Both expose the same free dual: 'replCommit' / 'replEmit'.
 module MockBackend
   ( MockMode (..),
     openMockRepl,
@@ -32,7 +32,7 @@ data MockMode
     FakePty
   deriving (Eq, Show)
 
--- | Open a mock 'Repl' under @/tmp/circuits-io-backend-<tag>/@.
+-- | Open a mock 'Repl' under @/tmp/circuits-io-backend-\<tag\>/@.
 -- Prompt is fixed @mock> @ (with trailing space).
 openMockRepl :: MockMode -> String -> IO Repl
 openMockRepl mode tag = do
@@ -47,11 +47,10 @@ openMockRepl mode tag = do
             replWorkingDir = dir,
             replStdinPath = dir </> "stdin.fifo",
             replStdoutPath = logPath,
-            replStderrPath = dir </> "stderr.md",
-            replTokenPath = dir </> "write.token"
+            replStderrPath = dir </> "stderr.md"
           }
   writeFile logPath ""
-  -- Initial prompt so sync can complete after first command.
+  -- Initial prompt so free emit can see something before first commit.
   TIO.appendFile logPath "welcome\nmock> "
 
   inject <- case mode of
@@ -66,7 +65,7 @@ openMockRepl mode tag = do
 -- | Fake process: echo command, result line, prompt.
 respond :: FilePath -> Text -> IO ()
 respond logPath cmd = do
-  -- slight delay so emit/drain ordering matches real processes
+  -- slight delay so emit ordering matches real processes
   threadDelay 20_000
   TIO.appendFile logPath $
     T.unlines

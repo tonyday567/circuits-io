@@ -1,32 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Example: driving a cabal repl (or ghci) as a clean, interactive tool
--- from Haskell code / agents.
+-- | Free dual ends on a process agent (mock-repl stand-in for cabal/ghci).
 --
--- This is the recommended replacement for the older grepl package
--- (now considered deprecated for new work).
+-- @
+--   open → commit / emit independently → close
+-- @
 --
--- Parking note: development of the REPL machinery and agent comms is parked
--- here in circuits-io while side-activity happens on the main `circuits`
--- package. Everything needed to pick up the thread (including the open
--- bidirectional multi-round comms work) is self-contained. See the simulation
--- at the end of this file and the "Bidirectional Multi-Round..." section in
--- readme.md.
+-- No request–response helper in the library.  This example builds a local
+-- @emitUntil@ that ties emit to a boundary + timeout — that circuit is the
+-- place the clock lives, not the Repl.
 --
--- Key features demonstrated:
--- * Startup "guff" (build profiles, configuring, "Ok, modules loaded") is filtered.
--- * Prompt-based synchronization so you get clean response blocks.
--- * Simple helpers for the common interactive workflow: :t, :i, :k, eval.
--- * The underlying FIFO mechanism means one REPL process can be shared
---   by multiple clients (agents or you + an agent) via 'replAttach'.
---
--- Typical use: following a type trail while exploring a new library or
--- composing a pipeline of functions.
---
--- Run with the mock for a self-contained demo:
---   cabal run --builddir=dist-newstyle cabal-repl-example
---
--- Or point it at a real project by changing the config.
+-- @
+--   cabal run cabal-repl-example
+-- @
 module Main where
 
 import Circuit.Repl
@@ -38,11 +24,8 @@ import System.IO (hPutStrLn, stderr)
 
 main :: IO ()
 main = do
-  hPutStrLn stderr "=== circuits-io Cabal REPL example (using mock for demo) ==="
-  hPutStrLn stderr "This shows filtering of startup ceremony and clean command responses."
+  hPutStrLn stderr "=== circuits-io free dual ends (mock-repl) ==="
 
-  -- Use the built mock-repl as a stand-in that produces GHCi-like output
-  -- including startup guff. In real use, point at "cabal" "repl" in a project dir.
   let cfg =
         defaultReplConfig
           { replCommand = "./dist-newstyle/build/aarch64-osx/ghc-9.14.1/circuits-io-0.1.0.0/x/mock-repl/build/mock-repl/mock-repl",
@@ -50,95 +33,48 @@ main = do
             replWorkingDir = "."
           }
 
-  -- Start (or attach to) the REPL.
-  -- For shared use by two agents at the same time, one does replOpen,
-  -- the others do replAttach with the *same* config paths.
   r <- replOpen cfg
-  threadDelay 300000 -- let startup guff be written
+  threadDelay 300_000
 
-  -- Consume the initial prompt (this discards the build guff via sync).
-  _ <- replSync r
+  -- Drain startup by tying emit to a local boundary (example only).
+  _ <- emitUntil (T.isSuffixOf "ghci> ") 5_000_000 r
 
-  -- Now use the clean ghciCommand helper.
-  -- It sends the command, waits for the next prompt, and filters guff.
-  typeOfId <- ghciCommand r ":t id"
+  let (_write, _read) = endsRepl r
+  hPutStrLn stderr "endsRepl: free Commit + Emit in hand"
+
+  -- Free commit, then a local turn circuit.
+  replCommit r ":t id"
+  mType <- emitUntil (T.isSuffixOf "ghci> ") 10_000_000 r
   TIO.putStrLn "=== :t id ==="
-  mapM_ TIO.putStrLn typeOfId
+  mapM_ TIO.putStrLn (maybe [] id mType)
 
-  kindOfMaybe <- ghciCommand r ":k Maybe"
-  TIO.putStrLn "\n=== :k Maybe ==="
-  mapM_ TIO.putStrLn kindOfMaybe
+  replCommit r "add 3"
+  mAdd <- emitUntil (T.isSuffixOf "ghci> ") 10_000_000 r
+  TIO.putStrLn "\n=== add 3 ==="
+  mapM_ TIO.putStrLn (maybe [] id mAdd)
 
-  -- Simulate exploring a "new library" by loading something and querying.
-  -- (With real cabal repl in a project with libraries, this becomes powerful.)
-  _ <- ghciCommand r "import Data.Maybe"
-  infoJust <- ghciCommand r ":i fromJust"
-  TIO.putStrLn "\n=== :i fromJust (after import) ==="
-  mapM_ TIO.putStrLn infoJust
+  -- Free emit without a turn: non-blocking harvest.
+  extra <- replEmit r
+  TIO.putStrLn $ "\nfree emit (should be empty): " <> T.pack (show extra)
 
-  -- Pipeline building example: evaluate a small expression.
-  evalExample <- ghciCommand r "Just 42 >>= \\x -> return (x + 1)"
-  TIO.putStrLn "\n=== eval a small pipeline ==="
-  mapM_ TIO.putStrLn evalExample
-
-  -- Demonstrate attach for "both use it at the same time".
-  -- In a real scenario, another agent/process can do:
-  --   r2 <- replAttach cfg
-  --   ... use r2 for its own queries ...
-  -- Both see the shared output log; writes are serialized.
-  -- Here we just show attach works and sees subsequent output.
-  r2 <- replAttach cfg
-  -- Give a command from the "second client"
-  _ <- ghciCommand r2 "length [1,2,3]"
-  TIO.putStrLn "\n=== second client (via attach) got a response ==="
-  -- We can emit from either to see new stuff
-  newFromR1 <- replEmit r
-  mapM_ TIO.putStrLn newFromR1
-
-  -- === Bidirectional multi-round comms simulation ===
-  -- This is the current state of the "thread": we have shared REPL sessions
-  -- (multiple Repl handles via replAttach on the same FIFO+log), clean
-  -- command/response, and the ability for agents to take turns.
-  -- However, we have not yet demonstrated a full automated bidirectional
-  -- multi-round loop (AgentA posts message/task -> AgentB consumes, computes,
-  -- replies -> AgentA reacts, etc.) without the driver (this main) doing the
-  -- orchestration. That is the open thread to pick up later (e.g. build a
-  -- higher-level ReplBus or AgentChannel abstraction that provides send/receive
-  -- with proper sync on top of Repl + the log as transcript).
-  --
-  -- Below is a *simulation* of two agents using the shared REPL as blackboard
-  -- for multi-round exchange. In a real setup each "agent" would be in its own
-  -- thread/process polling/attaching.
-
-  TIO.putStrLn "\n=== Bidirectional multi-round agent comms simulation (shared REPL blackboard) ==="
-
-  rA <- replAttach cfg
-  rB <- replAttach cfg
-
-  -- Round 1: Agent A posts a task into the shared REPL state
-  _ <- ghciCommand rA "let taskFromA = \"sum 1 to 10\""
-  TIO.putStrLn "Agent A posted task"
-
-  -- Round 2: Agent B "wakes", inspects the task, computes reply
-  _ <- ghciCommand rB "taskFromA"
-  _ <- ghciCommand rB "let replyFromB = 55" -- pretend computation of sum [1..10]
-  TIO.putStrLn "Agent B read task and posted reply"
-
-  -- Round 3: Agent A checks the reply and "acknowledges"
-  _ <- ghciCommand rA "replyFromB"
-  _ <- ghciCommand rA "let ackFromA = \"got it\""
-  TIO.putStrLn "Agent A retrieved reply and posted ack"
-
-  -- One more round for good measure
-  _ <- ghciCommand rB "ackFromA"
-  TIO.putStrLn "Agent B saw ack"
-
-  TIO.putStrLn "=== End of simulated multi-round comms ==="
-
-  -- Clean up (only the owner needs to close the process).
   replClose r
+  hPutStrLn stderr "=== done ==="
 
-  hPutStrLn stderr "\n=== done. The same pattern works with a real 'cabal repl' ==="
-  hPutStrLn stderr "by using startCabalRepl \".\" or a custom ReplConfig."
-  hPutStrLn stderr "See the implementation of ghciCommand and isGuff for how the"
-  hPutStrLn stderr "startup ceremony and prompt searching are handled."
+-- | Local tie: poll free emit until boundary or timeout (µs).
+-- Not exported from Circuit.Repl — lives with the runner.
+emitUntil :: (Text -> Bool) -> Int -> Repl -> IO (Maybe [Text])
+emitUntil isBoundary timeoutUs r = go 0 [] 10000
+  where
+    go elapsed acc delay = do
+      news <- replEmit r
+      let acc' = acc <> news
+      if any isBoundary news
+        then pure (Just acc')
+        else do
+          let elapsed' = elapsed + delay
+          if elapsed' >= timeoutUs
+            then pure Nothing
+            else do
+              threadDelay delay
+              let delay' = min 500000 (floor (fromIntegral delay * 1.5 :: Double))
+              go elapsed' acc' delay'
