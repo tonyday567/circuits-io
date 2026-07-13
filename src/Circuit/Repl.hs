@@ -56,7 +56,7 @@ import Data.Foldable (for_)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath (takeDirectory)
@@ -332,12 +332,15 @@ replRead r = Arr $ Kleisli $ \() -> replEmit r
 -- ---------------------------------------------------------------------------
 
 -- | Read raw log content (empty if missing).
+--
+-- Uses a strict byte read so concurrent appenders do not keep a lazy
+-- read handle open on the append-only log.
 readLogContent :: FilePath -> IO Text
 readLogContent fp = do
   exists <- doesFileExist fp
   if not exists
     then pure ""
-    else TIO.readFile fp
+    else decodeUtf8 <$> BS.readFile fp
 
 -- | Split into complete (newline-terminated) lines and optional trailing partial.
 splitComplete :: Text -> ([Text], Maybe Text)

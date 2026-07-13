@@ -7,24 +7,29 @@
 --   1. emit-only  — harvest without committing
 --   2. commit-only — inject without reading
 --   3. free emit after (2) — independence (no request–response in the type)
---   4. turn        — local circuit that /ties/ commit to emit-until-boundary
---                    (timeout lives only here)
+--   4. turn        — 'Circuit.Repl.Turn.turnUntil' ties commit to emit
 --   5. attach      — second cursor, free fan-out read
 --
 -- Targets (argv):
 --
 --   dual-spike              mock-repl over FIFO  (default, deterministic)
 --   dual-spike python       python3 -q over PTY  (real process, clear >>>)
+--   dual-spike hermes       hermes chat -q      (oneshot box, optional)
 --
--- Not hermes yet: chrome is noisy; prove the dual first, then swap Config.
+-- The hermes target is optional: it exercises 'closeOnce' against a real
+-- external agent, but depends on the local hermes install and box shape.
 --
 -- @
 --   cabal run dual-spike
 --   cabal run dual-spike -- python
+--   cabal run dual-spike -- hermes
 -- @
 module Main (main) where
 
+import Circuit.Layer (run)
 import Circuit.Repl
+import Circuit.Repl.Turn (TurnConfig (..), closeOnce, defaultTurnConfig, turnUntil)
+import Control.Arrow (runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless, when)
 import Data.Text (Text)
@@ -41,9 +46,10 @@ main = do
   args <- getArgs
   case args of
     ["python"] -> runPython
+    ["hermes"] -> runHermes
     [] -> runMock
     _ -> do
-      hPutStrLn stderr "usage: dual-spike | dual-spike python"
+      hPutStrLn stderr "usage: dual-spike | dual-spike python | dual-spike hermes"
       exitFailure
 
 -- ---------------------------------------------------------------------------
@@ -67,7 +73,8 @@ runMock = do
             replStderrPath = "/tmp/dual-spike-mock-err.md",
             replWorkingDir = "."
           }
-  mapM_ removeIfExists
+  mapM_
+    removeIfExists
     [ replStdinPath cfg,
       replStdoutPath cfg,
       replStderrPath cfg,
@@ -119,11 +126,52 @@ runPython = do
   hPutStrLn stderr "=== python PASS ==="
 
 -- ---------------------------------------------------------------------------
--- Spike body (same for every target)
+-- Target: hermes chat -q (optional, oneshot box)
+-- ---------------------------------------------------------------------------
+
+runHermes :: IO ()
+runHermes = do
+  hPutStrLn stderr "=== dual-spike: hermes chat -q (optional) ==="
+  home <- getEnv "HOME"
+  let dir = home </> "mg" </> "logs" </> "process-harness" </> "dual-spike-hermes"
+  createDirectoryIfMissing True dir
+  let query = "what is 2 + 2? answer with a single digit"
+  let cfg =
+        defaultReplConfig
+          { replCommand = "hermes",
+            replArgs = ["chat", "-q", query],
+            replWorkingDir = ".",
+            replStdinPath = dir </> "stdin.fifo",
+            replStdoutPath = dir </> "stdout.md",
+            replStderrPath = dir </> "stderr.md"
+          }
+  writeFile (replStdoutPath cfg) ""
+
+  r <- replOpen cfg
+  -- Hermes boxes close with a ╰─ line; treat that as the EOF tag.
+  let turnCfg =
+        defaultTurnConfig
+          { turnTimeoutUs = 60_000_000,
+            turnEofTag = "╰─"
+          }
+  mOut <- runKleisli (run (closeOnce turnCfg r)) ""
+  replClose r
+  case mOut of
+    Nothing -> failMsg "hermes target timed out"
+    Just out -> do
+      showLines "hermes" out
+      unless (any ("4" `T.isInfixOf`) out) $
+        failMsg "hermes target did not produce expected answer '4'"
+      hPutStrLn stderr "=== hermes PASS ==="
+
+-- ---------------------------------------------------------------------------
+-- Spike body (same for every persistent target)
 -- ---------------------------------------------------------------------------
 
 spike :: Repl -> ReplConfig -> (Text -> Bool) -> [(Text, Text)] -> IO ()
-spike r cfg isBoundary cmds = do
+spike _ _ _ [] = failMsg "spike requires at least one (command, expected) pair"
+spike _ _ _ [_] = failMsg "spike requires at least two (command, expected) pairs"
+spike r cfg isBoundary ((cmd1, expect1) : (cmd2, expect2) : _) = do
   let (_write, _emit) = endsRepl r
   step "0 endsRepl" "Commit + Emit wires in hand (Queue dual shape)"
 
@@ -137,7 +185,6 @@ spike r cfg isBoundary cmds = do
       pass "emit-only saw a boundary without committing"
 
   -- 2. free commit only — no read
-  let (cmd1, expect1) = head cmds
   step "2 commit-only" $ "inject " <> T.unpack (T.pack (show cmd1)) <> " without reading"
   replCommit r cmd1
   pass "commit returned immediately (no wait baked into Repl)"
@@ -150,21 +197,21 @@ spike r cfg isBoundary cmds = do
     Just ls -> do
       showLines "after-commit" ls
       unless (any (expect1 `T.isInfixOf`) ls) $
-        failMsg $ "phase 3: expected substring " <> T.unpack expect1
+        failMsg $
+          "phase 3: expected substring " <> T.unpack expect1
       pass "emit harvested commit result without Repl knowing about turns"
 
-  -- 4. explicit turn — same as 2+3, named as the tied circuit
-  when (length cmds >= 2) $ do
-    let (cmd2, expect2) = cmds !! 1
-    step "4 turn" "local turn = commit ; emitUntil boundary timeout"
-    m2 <- turn isBoundary 15_000_000 r cmd2
-    case m2 of
-      Nothing -> failMsg "phase 4: turn timed out"
-      Just ls -> do
-        showLines "turn" ls
-        unless (any (expect2 `T.isInfixOf`) ls) $
-          failMsg $ "phase 4: expected substring " <> T.unpack expect2
-        pass "turn is a named runner circuit; clock is visible"
+  -- 4. explicit turn — Circuit.Repl.Turn, Tensor-era runner circuit
+  step "4 turn" "Circuit.Repl.Turn.turnUntil (Tensor-only runner circuit)"
+  m2 <- runKleisli (run (turnUntil defaultTurnConfig isBoundary r)) cmd2
+  case m2 of
+    Nothing -> failMsg "phase 4: turn timed out"
+    Just ls -> do
+      showLines "turn" ls
+      unless (any (expect2 `T.isInfixOf`) ls) $
+        failMsg $
+          "phase 4: expected substring " <> T.unpack expect2
+      pass "turn is a named runner circuit; clock is visible in TurnConfig"
 
   -- 5. attach — second free reader (own cursor on the same log)
   step "5 attach" "second cursor; free fan-out emit"
@@ -172,9 +219,10 @@ spike r cfg isBoundary cmds = do
   -- Attach seeks past complete lines. A hanging partial prompt may still
   -- surface once (emit's partial-line rule) — drain it; that is not history.
   drain <- replEmit bob
-  when (not (null drain)) $
+  unless (null drain) $
     showLines "attach-drain-partial" drain
-  let (cmdFan, expectFan) = head cmds
+  let cmdFan = cmd1
+  let expectFan = expect1
   replCommit r cmdFan
   mBob <- emitUntil isBoundary 15_000_000 bob
   case mBob of
@@ -186,13 +234,6 @@ spike r cfg isBoundary cmds = do
       pass "attach is free multi-reader emit; no second process"
 
   pure ()
-
--- | Local tied circuit: commit then emit until boundary or timeout (µs).
--- Lives in the spike, not in Circuit.Repl.
-turn :: (Text -> Bool) -> Int -> Repl -> Text -> IO (Maybe [Text])
-turn isBoundary timeoutUs r cmd = do
-  replCommit r cmd
-  emitUntil isBoundary timeoutUs r
 
 -- | Poll free emit until a line satisfies the boundary, or timeout (µs).
 emitUntil :: (Text -> Bool) -> Int -> Repl -> IO (Maybe [Text])
