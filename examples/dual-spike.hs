@@ -14,21 +14,16 @@
 --
 --   dual-spike              mock-repl over FIFO  (default, deterministic)
 --   dual-spike python       python3 -q over PTY  (real process, clear >>>)
---   dual-spike hermes       hermes chat -q      (oneshot box, optional)
---
--- The hermes target is optional: it exercises 'closeOnce' against a real
--- external agent, but depends on the local hermes install and box shape.
 --
 -- @
 --   cabal run dual-spike
 --   cabal run dual-spike -- python
---   cabal run dual-spike -- hermes
 -- @
 module Main (main) where
 
 import Circuit.Layer (run)
 import Circuit.Repl
-import Circuit.Repl.Turn (TurnConfig (..), closeOnce, defaultTurnConfig, turnUntil)
+import Circuit.Repl.Turn (TurnConfig (..), defaultTurnConfig, turnUntil)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless, when)
@@ -46,10 +41,9 @@ main = do
   args <- getArgs
   case args of
     ["python"] -> runPython
-    ["hermes"] -> runHermes
     [] -> runMock
     _ -> do
-      hPutStrLn stderr "usage: dual-spike | dual-spike python | dual-spike hermes"
+      hPutStrLn stderr "usage: dual-spike | dual-spike python"
       exitFailure
 
 -- ---------------------------------------------------------------------------
@@ -124,45 +118,6 @@ runPython = do
     ]
   replClose r
   hPutStrLn stderr "=== python PASS ==="
-
--- ---------------------------------------------------------------------------
--- Target: hermes chat -q (optional, oneshot box)
--- ---------------------------------------------------------------------------
-
-runHermes :: IO ()
-runHermes = do
-  hPutStrLn stderr "=== dual-spike: hermes chat -q (optional) ==="
-  home <- getEnv "HOME"
-  let dir = home </> "mg" </> "logs" </> "process-harness" </> "dual-spike-hermes"
-  createDirectoryIfMissing True dir
-  let query = "what is 2 + 2? answer with a single digit"
-  let cfg =
-        defaultReplConfig
-          { replCommand = "hermes",
-            replArgs = ["chat", "-q", query],
-            replWorkingDir = ".",
-            replStdinPath = dir </> "stdin.fifo",
-            replStdoutPath = dir </> "stdout.md",
-            replStderrPath = dir </> "stderr.md"
-          }
-  writeFile (replStdoutPath cfg) ""
-
-  r <- replOpen cfg
-  -- Hermes boxes close with a ╰─ line; treat that as the EOF tag.
-  let turnCfg =
-        defaultTurnConfig
-          { turnTimeoutUs = 60_000_000,
-            turnEofTag = "╰─"
-          }
-  mOut <- runKleisli (run (closeOnce turnCfg r)) ""
-  replClose r
-  case mOut of
-    Nothing -> failMsg "hermes target timed out"
-    Just out -> do
-      showLines "hermes" out
-      unless (any ("4" `T.isInfixOf`) out) $
-        failMsg "hermes target did not produce expected answer '4'"
-      hPutStrLn stderr "=== hermes PASS ==="
 
 -- ---------------------------------------------------------------------------
 -- Spike body (same for every persistent target)
