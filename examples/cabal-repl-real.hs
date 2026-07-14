@@ -54,7 +54,7 @@ main = do
     Just _ -> pure ()
 
   hPutStrLn stderr "-- commit :t id --"
-  replCommit r ":t id"
+  replCommit r [":t id"]
   mType <- emitUntil isGhciPrompt 60_000_000 r
   case mType of
     Nothing -> failMsg "timeout on :t id"
@@ -64,7 +64,7 @@ main = do
         failMsg "expected 'id ::' in :t id response"
 
   hPutStrLn stderr "-- commit 1+1 --"
-  replCommit r "1+1"
+  replCommit r ["1+1"]
   mSum <- emitUntil isGhciPrompt 60_000_000 r
   case mSum of
     Nothing -> failMsg "timeout on 1+1"
@@ -79,7 +79,7 @@ main = do
   unless (null stale) $
     failMsg "attach should start at log tail"
 
-  replCommit r ":t const"
+  replCommit r [":t const"]
   -- owner drains; bob may also free-emit the same log
   mBob <- emitUntil isGhciPrompt 60_000_000 bob
   case mBob of

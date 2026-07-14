@@ -58,7 +58,7 @@ loop agent ch = do
     when (sender /= "agent") $ do
       hPutStrLn stderr $ "  ← [" <> T.unpack sender <> "] " <> T.unpack (T.take 80 body)
       -- free commit: no wait for response in the library
-      replCommit agent body
+      replCommit agent [body]
 
   -- free emit: harvest whatever the agent printed since last poll
   out <- replEmit agent

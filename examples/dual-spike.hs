@@ -141,7 +141,7 @@ spike r cfg isBoundary ((cmd1, expect1) : (cmd2, expect2) : _) = do
 
   -- 2. free commit only — no read
   step "2 commit-only" $ "inject " <> T.unpack (T.pack (show cmd1)) <> " without reading"
-  replCommit r cmd1
+  replCommit r [cmd1]
   pass "commit returned immediately (no wait baked into Repl)"
 
   -- 3. free emit after — proves independence via the shared log
@@ -158,7 +158,7 @@ spike r cfg isBoundary ((cmd1, expect1) : (cmd2, expect2) : _) = do
 
   -- 4. explicit turn — Circuit.Repl.Turn, Tensor-era runner circuit
   step "4 turn" "Circuit.Repl.Turn.turnUntil (Tensor-only runner circuit)"
-  m2 <- runKleisli (run (turnUntil defaultTurnConfig isBoundary r)) cmd2
+  m2 <- runKleisli (run (turnUntil defaultTurnConfig isBoundary r)) [cmd2]
   case m2 of
     Nothing -> failMsg "phase 4: turn timed out"
     Just ls -> do
@@ -178,7 +178,7 @@ spike r cfg isBoundary ((cmd1, expect1) : (cmd2, expect2) : _) = do
     showLines "attach-drain-partial" drain
   let cmdFan = cmd1
   let expectFan = expect1
-  replCommit r cmdFan
+  replCommit r [cmdFan]
   mBob <- emitUntil isBoundary 15_000_000 bob
   case mBob of
     Nothing -> failMsg "phase 5: attach reader never saw boundary"

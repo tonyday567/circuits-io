@@ -74,7 +74,7 @@ replTests =
         threadDelay 500_000
 
         _ <- emitUntil (T.isSuffixOf "mock> ") 5_000_000 repl -- drain welcome
-        replCommit repl "hello"
+        replCommit repl ["hello"]
         mResp <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
 
         -- After consuming via emitUntil, free emit should see nothing new
@@ -105,13 +105,13 @@ replTests =
 
         _ <- emitUntil (T.isSuffixOf "mock> ") 5_000_000 repl
 
-        replCommit repl "add 3"
+        replCommit repl ["add 3"]
         m1 <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
         case m1 of
           Nothing -> assertFailure "timeout on first command"
           Just ls -> assertBool "first result has 3" ("result: 3" `T.isInfixOf` T.unlines ls)
 
-        replCommit repl "get"
+        replCommit repl ["get"]
         m2 <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 repl
         case m2 of
           Nothing -> assertFailure "timeout on second command"
@@ -136,7 +136,7 @@ replTests =
         threadDelay 500_000
 
         _ <- emitUntil (T.isInfixOf "mock-hang>") 5_000_000 repl
-        replCommit repl "hello"
+        replCommit repl ["hello"]
         mResp <- emitUntil (T.isInfixOf "mock-hang>") 10_000_000 repl
 
         replClose repl
@@ -164,7 +164,7 @@ replTests =
         stale <- replEmit attacher
         assertBool "attach cursor at tail sees nothing yet" (null stale)
 
-        replCommit attacher "hello"
+        replCommit attacher ["hello"]
         mResp <- emitUntil (T.isSuffixOf "mock> ") 10_000_000 owner
         case mResp of
           Nothing -> assertFailure "owner did not see attach commit"
@@ -208,7 +208,7 @@ backendTests =
     dualMode mode tag = do
       r <- openMockRepl mode tag
       _ <- emitUntil (T.isSuffixOf "mock> ") 2_000_000 r
-      replCommit r "hello"
+      replCommit r ["hello"]
       m <- emitUntil (T.isSuffixOf "mock> ") 2_000_000 r
       case m of
         Nothing -> assertFailure (tag <> ": no boundary")

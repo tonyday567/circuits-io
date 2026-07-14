@@ -22,12 +22,12 @@ it likes, and loops when it likes. No request–response contract in the type.
 -- lifecycle
 replOpen, replAttach, replClose, replOpenPty, replOpenInject
 
--- dual ends (independent)
-replCommit :: Repl -> Text -> IO ()     -- write TO the agent
+-- dual ends (independent; same object type — Queue dual)
+replCommit :: Repl -> [Text] -> IO ()   -- write TO the agent
 replEmit   :: Repl -> IO [Text]         -- read FROM the agent
 
-endsRepl   :: Repl -> (Commit IO Text, Emit IO [Text])
--- same shape as Circuit.Queue.endsQueue
+endsRepl   :: Repl -> (Commit IO [Text], Emit IO [Text])
+-- same shape as Circuit.Queue.endsQueue  (agent as [Text] → [Text])
 ```
 
 Timeout and turn boundaries live only in **runner** circuits that *tie* the two
@@ -37,7 +37,7 @@ Backends: FIFO (child writes log), PTY (parent pumps log), inject (tests).
 
 ```haskell
 r <- replOpen cfg
-replCommit r ":t id"
+replCommit r [":t id"]
 ls <- replEmit r          -- whatever is new; may be empty
 let (w, e) = endsRepl r   -- free wires for composition
 ```

@@ -271,11 +271,18 @@ replClose r = case replBackend r of
 -- Dual ends
 -- ---------------------------------------------------------------------------
 
--- | Write one line into the agent (commit end).
+-- | Write lines into the agent (commit end).
 --
 -- Independent of emit: does not wait for output, prompts, or completion.
-replCommit :: Repl -> Text -> IO ()
-replCommit r t = case replBackend r of
+-- Empty list is a no-op. Each element is one line (backend appends @\\n@).
+-- Matches 'replEmit' object type so the dual is an @[Text] → [Text]@ agent.
+replCommit :: Repl -> [Text] -> IO ()
+replCommit _ [] = pure ()
+replCommit r ts = mapM_ (replCommitLine r) ts
+
+-- | Line-level backend write (private transport).
+replCommitLine :: Repl -> Text -> IO ()
+replCommitLine r t = case replBackend r of
   BackendFifo {beFifo} ->
     withFile beFifo WriteMode $ \h -> do
       TIO.hPutStrLn h t
@@ -310,17 +317,17 @@ replEmit r = do
 --
 -- @
 --   (commit, emit) = endsRepl r
---   -- commit :: Commit IO Text     --  Text → ()
+--   -- commit :: Commit IO [Text]  --  [Text] → ()
 --   -- emit   :: Emit   IO [Text]  --  () → [Text]
 -- @
 --
 -- Compose freely.  A turn is an optional circuit that ties them
 -- (boundary detector + timeout) — not provided here.
-endsRepl :: Repl -> (Commit IO Text, Emit IO [Text])
+endsRepl :: Repl -> (Commit IO [Text], Emit IO [Text])
 endsRepl r = (replWrite r, replRead r)
 
--- | Commit end as a 'Trace' wire (@Text → ()@).
-replWrite :: Repl -> Trace t (Kleisli IO) Text ()
+-- | Commit end as a 'Trace' wire (@[Text] → ()@).
+replWrite :: Repl -> Trace t (Kleisli IO) [Text] ()
 replWrite r = Arr $ Kleisli $ replCommit r
 
 -- | Emit end as a 'Trace' wire (@() → [Text]@).

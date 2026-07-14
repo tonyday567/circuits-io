@@ -43,12 +43,12 @@ main = do
   hPutStrLn stderr "endsRepl: free Commit + Emit in hand"
 
   -- Free commit, then a local turn circuit.
-  replCommit r ":t id"
+  replCommit r [":t id"]
   mType <- emitUntil (T.isSuffixOf "ghci> ") 10_000_000 r
   TIO.putStrLn "=== :t id ==="
   mapM_ TIO.putStrLn (maybe [] id mType)
 
-  replCommit r "add 3"
+  replCommit r ["add 3"]
   mAdd <- emitUntil (T.isSuffixOf "ghci> ") 10_000_000 r
   TIO.putStrLn "\n=== add 3 ==="
   mapM_ TIO.putStrLn (maybe [] id mAdd)

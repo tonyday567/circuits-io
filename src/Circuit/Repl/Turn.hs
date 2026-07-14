@@ -8,8 +8,8 @@
 -- the tying schedule lives here, outside the core library.
 --
 -- @
---   closeOnce cfg r  :: Trace (,) (Kleisli IO) Text [Text]
---   turnUntil cfg p r :: Trace (,) (Kleisli IO) Text [Text]
+--   closeOnce cfg r  :: Trace (,) (Kleisli IO) [Text] (Maybe [Text])
+--   turnUntil cfg p r :: Trace (,) (Kleisli IO) [Text] (Maybe [Text])
 -- @
 --
 -- Both return 'Nothing' when the timeout expires before the boundary is
@@ -50,18 +50,18 @@ defaultTurnConfig =
       turnEofTag = "<EOF>"
     }
 
--- | One turn: commit the input 'Text', then emit until the boundary
+-- | One turn: commit input lines, then emit until the boundary
 -- predicate succeeds or the timeout expires.
 --
--- The result is a @Trace (,) (Kleisli IO)@ circuit — planar Par of the
--- commit and emit wires, scheduled into a sequence by the runner.
+-- Agent endomorphism @[Text] → Maybe [Text]@ — matches the free dual
+-- on 'replCommit' / 'replEmit'.
 turnUntil ::
   TurnConfig ->
   (Text -> Bool) ->
   Repl ->
-  Trace (,) (Kleisli IO) Text (Maybe [Text])
-turnUntil cfg isBoundary r = Arr $ Kleisli $ \cmd -> do
-  replCommit r cmd
+  Trace (,) (Kleisli IO) [Text] (Maybe [Text])
+turnUntil cfg isBoundary r = Arr $ Kleisli $ \cmds -> do
+  replCommit r cmds
   poll 0 [] 10_000
   where
     timeoutUs = turnTimeoutUs cfg
@@ -84,5 +84,5 @@ turnUntil cfg isBoundary r = Arr $ Kleisli $ \cmd -> do
 closeOnce ::
   TurnConfig ->
   Repl ->
-  Trace (,) (Kleisli IO) Text (Maybe [Text])
+  Trace (,) (Kleisli IO) [Text] (Maybe [Text])
 closeOnce cfg = turnUntil cfg (T.isInfixOf (turnEofTag cfg))
