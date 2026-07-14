@@ -8,11 +8,15 @@ import Circuit.Session
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (forM_, when)
+import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
+import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Vector qualified as V
 import MockBackend (MockMode (..), openMockRepl)
-import System.Directory (doesFileExist, removeFile)
+import System.Directory (doesFileExist, removeFile, removePathForcibly)
 import System.IO (hPutStrLn, stderr)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -24,6 +28,7 @@ main =
       "circuits-io"
       [ replTests,
         backendTests,
+        hermesTests,
         channelTests,
         sessionTests
       ]
@@ -218,6 +223,77 @@ backendTests =
       extra <- replEmit r
       assertBool (tag <> ": emit empty after drain") (null extra)
       replClose r
+
+-- ---------------------------------------------------------------------------
+-- Hermes session-file backend
+-- ---------------------------------------------------------------------------
+
+hermesTests :: TestTree
+hermesTests =
+  testGroup
+    "BackendHermes (session JSON)"
+    [ testCase "commit user then emit assistant" $ do
+        let path = "/tmp/circuits-io-hermes-session.json"
+        removePathForcibly path
+        removePathForcibly (path <> ".lock")
+        removePathForcibly (path <> ".cursor-hermes")
+        writeMinimalSession path
+          [ object ["role" .= ("user" :: Text), "content" .= ("hi" :: Text)]
+          , object ["role" .= ("assistant" :: Text), "content" .= ("hello" :: Text)]
+          ]
+
+        r <- replOpenHermes path
+        -- tail attach: history not re-emitted
+        early <- replEmit r
+        assertBool "no history on open" (null early)
+
+        replCommit r ["what is 2+2?"]
+        -- still no assistant reply yet
+        mid <- replEmit r
+        assertBool "no assistant yet" (null mid)
+
+        -- simulate Hermes writing an assistant reply (+ empty tool-call skip)
+        appendAssistant path "4"
+        appendAssistantEmpty path
+
+        out <- replEmit r
+        assertEqual "assistant content" ["4"] out
+
+        again <- replEmit r
+        assertBool "idempotent emit" (null again)
+
+        replClose r
+    ]
+
+writeMinimalSession :: FilePath -> [Value] -> IO ()
+writeMinimalSession path msgs = do
+  let o =
+        object
+          [ "session_id" .= ("test" :: Text)
+          , "message_count" .= length msgs
+          , "messages" .= msgs
+          ]
+  LBS.writeFile path (encode o)
+
+appendAssistant :: FilePath -> Text -> IO ()
+appendAssistant path content = do
+  bs <- LBS.readFile path
+  case eitherDecode bs of
+    Left err -> assertFailure ("session decode: " <> err)
+    Right (Object o) -> do
+      let old = case KM.lookup "messages" o of
+            Just (Array arr) -> arr
+            _ -> V.empty
+          msg = object ["role" .= ("assistant" :: Text), "content" .= content]
+          new = old <> V.singleton msg
+          o' =
+            KM.insert "messages" (Array new) $
+              KM.insert "message_count" (Number (fromIntegral (V.length new))) o
+      LBS.writeFile path (encode (Object o'))
+    Right _ -> assertFailure "expected object"
+
+appendAssistantEmpty :: FilePath -> IO ()
+appendAssistantEmpty path = appendAssistant path ""
 
 -- ---------------------------------------------------------------------------
 -- Channel tests (multi-agent comms using cat bus)

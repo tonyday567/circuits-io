@@ -20,7 +20,7 @@ it likes, and loops when it likes. No request–response contract in the type.
 
 ```haskell
 -- lifecycle
-replOpen, replAttach, replClose, replOpenPty, replOpenInject
+replOpen, replAttach, replClose, replOpenPty, replOpenInject, replOpenHermes
 
 -- dual ends (independent; same object type — Queue dual)
 replCommit :: Repl -> [Text] -> IO ()   -- write TO the agent
@@ -33,7 +33,8 @@ endsRepl   :: Repl -> (Commit IO [Text], Emit IO [Text])
 Timeout and turn boundaries live only in **runner** circuits that *tie* the two
 ends. They are not part of `Circuit.Repl`.
 
-Backends: FIFO (child writes log), PTY (parent pumps log), inject (tests).
+Backends: FIFO (child writes log), PTY (parent pumps log), inject (tests),
+Hermes session JSON (`replOpenHermes` — attach to file, not an agent runtime).
 
 ```haskell
 r <- replOpen cfg

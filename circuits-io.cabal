@@ -57,6 +57,7 @@ library
     Circuit.Time
 
   build-depends:
+    aeson >=2.0 && <2.3,
     base >=4.18 && <5,
     bytestring >=0.11 && <0.13,
     circuits >=0.1.0.0 && <0.3,
@@ -73,6 +74,7 @@ library
     process >=1.6 && <1.7,
     time >=1.12 && <2,
     unix,
+    vector >=0.13 && <0.14,
     websockets >=0.12 && <0.14,
 
 executable mock-repl
@@ -154,7 +156,9 @@ test-suite circuits-io-test
   main-is: Main.hs
   other-modules: MockBackend
   build-depends:
+    aeson >=2.0 && <2.3,
     base >=4.18 && <5,
+    bytestring >=0.11 && <0.13,
     circuits-io,
     circuits >=0.1.0.0 && <0.3,
     text >=2.0 && <3,
@@ -164,7 +168,8 @@ test-suite circuits-io-test
     async >=2.2 && <3,
     stm >=2.5 && <3,
     tasty >=1.4,
-    tasty-hunit >=0.10
+    tasty-hunit >=0.10,
+    vector >=0.13 && <0.14
   ghc-options:
     -threaded
     -rtsopts
