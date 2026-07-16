@@ -1,6 +1,6 @@
 -- | Time primitives for circuits — sleep, timestamp, gaps.
 --
--- Simple IO wrappers.  For 'Co'/'Contra' timing patterns,
+-- Simple IO wrappers.  For 'Out'/'In' timing patterns,
 -- compose with 'Circuit.Perf' primitives.
 module Circuit.Time
   ( -- * Sleep
